@@ -1,0 +1,42 @@
+# STM32 / embedded build outputs
+**/build/
+**/Debug/
+**/Release/
+**/cmake-build-*/
+
+# CMake / Ninja generated files
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/build.ninja
+**/compile_commands.json
+**/.ninja_*
+
+# Compiler / linker outputs
+*.o
+*.obj
+*.a
+*.so
+*.d
+*.su
+*.cyclo
+*.elf
+*.axf
+*.out
+*.bin
+*.hex
+*.map
+*.list
+
+# Dependency and generated listings
+*.dep
+*.dmp
+
+# Scratch and transient tooling files
+**/mx.scratch/
+*~
+*.swp
+*.tmp
+
+# Keep workspace and project metadata by default.
+# Add editor-specific ignores below only if you do not want them versioned.
