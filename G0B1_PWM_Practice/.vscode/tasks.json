@@ -1,0 +1,22 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build",
+            "type": "shell",
+            "command": "cmake --build ${workspaceFolder}/build/Debug",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "flash",
+            "type": "shell",
+            "command": "${userHome}/tools/openocd/bin/openocd -s ${userHome}/tools/openocd/openocd/scripts -f board/st_nucleo_g0.cfg -c \"program ${workspaceFolder}/build/Debug/G0B1_PWM_Practice.elf verify reset exit\"",
+            "dependsOn": "build",
+            "problemMatcher": []
+        }
+    ]
+}
