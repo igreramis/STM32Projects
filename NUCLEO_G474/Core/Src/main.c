@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "pwm_breaker.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -178,7 +178,7 @@ int main(void)
   MX_GPIO_Init();
   MX_HRTIM1_Init();
   /* USER CODE BEGIN 2 */
-
+  PWM_Breaker_Init(&hhrtim1);
   /* USER CODE END 2 */
 
   /* Initialize led */
@@ -214,6 +214,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    PWM_Breaker_Poll();
     Button_Poll();
     LED_Poll();
   }
@@ -504,12 +505,7 @@ static void TD1_SequenceStart(void)
                             HRTIM_TIM_IT_REP);
   HAL_NVIC_ClearPendingIRQ(HRTIM1_TIMD_IRQn);
 
-  if (HAL_HRTIM_WaveformOutputStart(&hhrtim1,
-                                   HRTIM_OUTPUT_TD1 | HRTIM_OUTPUT_TD2 |
-                                   HRTIM_OUTPUT_TF1) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  PWM_Breaker_EnableOutputs();
   /* One MCR write starts both counters on the same clock edge. */
   if (HAL_HRTIM_WaveformCountStart_IT(&hhrtim1,
                                      HRTIM_TIMERID_TIMER_D |

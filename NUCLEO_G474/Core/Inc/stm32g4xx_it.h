@@ -58,7 +58,7 @@ void SysTick_Handler(void);
 void EXTI15_10_IRQHandler(void);
 void HRTIM1_TIMD_IRQHandler(void);
 /* USER CODE BEGIN EFP */
-
+void COMP1_2_3_IRQHandler(void);
 /* USER CODE END EFP */
 
 #ifdef __cplusplus

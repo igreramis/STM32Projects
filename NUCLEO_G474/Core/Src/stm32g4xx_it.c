@@ -22,6 +22,7 @@
 #include "stm32g4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "pwm_breaker.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -227,5 +228,11 @@ void HRTIM1_TIMD_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+void COMP1_2_3_IRQHandler(void)
+{
+  /* COMP2/3 are unused; only COMP1 EXTI21 is enabled. */
+  PWM_Breaker_COMP_IRQHandler();
+}
 
 /* USER CODE END 1 */
