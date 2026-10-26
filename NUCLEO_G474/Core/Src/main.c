@@ -84,7 +84,11 @@ static const struct
 };
 static uint32_t active_channel;
 static const uint32_t normal_period_ticks[] = {34000U, 6800U, 3400U};
-static uint32_t normal_frequency_index;
+static volatile uint32_t normal_frequency_index;
+/* Half-periods for 1/2/4 Hz LD2 blinking at 10/50/100 kHz PWM. */
+static const uint32_t led_half_period_ms[] = {500U, 250U, 125U};
+static uint32_t led_active_half_period_ms;
+static uint32_t led_last_toggle_at;
 static uint32_t button_raw;
 static uint32_t button_stable;
 static uint32_t button_changed_at;
@@ -103,6 +107,7 @@ static void NormalMode_Enter(void);
 static void NormalMode_QueueWaveform(uint32_t frequency_index);
 static void Button_Poll(void);
 static void Button_OnShortPress(void);
+static void LED_Poll(void);
 
 /* USER CODE END PFP */
 
@@ -201,6 +206,7 @@ int main(void)
   button_raw = (BSP_PB_GetState(BUTTON_USER) != 0) ? 1U : 0U;
   button_stable = button_raw;
   button_changed_at = HAL_GetTick();
+  BSP_LED_Off(LED_GREEN);
   TD1_SequenceStart();
   while (1)
   {
@@ -209,6 +215,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     Button_Poll();
+    LED_Poll();
   }
   /* USER CODE END 3 */
 }
@@ -429,6 +436,35 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+/* LD2 (PA5) stays off during startup. Normal mode uses 50% duty blinking
+ * at 1/2/4 Hz. Restart with the LED on whenever the PWM selection changes.
+ * Only the main loop drives the LED; HRTIM timing and interrupts are untouched.
+ */
+static void LED_Poll(void)
+{
+  if (app_mode != APP_MODE_NORMAL)
+  {
+    return;
+  }
+
+  uint32_t half_period = led_half_period_ms[normal_frequency_index];
+  uint32_t now = HAL_GetTick();
+  if (half_period != led_active_half_period_ms)
+  {
+    led_active_half_period_ms = half_period;
+    led_last_toggle_at = now;
+    BSP_LED_On(LED_GREEN);
+    return;
+  }
+
+  /* Unsigned elapsed time remains valid across HAL tick wraparound. */
+  if ((uint32_t)(now - led_last_toggle_at) >= half_period)
+  {
+    led_last_toggle_at = now;
+    BSP_LED_Toggle(LED_GREEN);
+  }
+}
 
 /* Cyclic startup sequence, stopped only by the PC13 user button.
  * Timers D/F: 340 MHz equivalent clock, PER = 34000 (100 us).
