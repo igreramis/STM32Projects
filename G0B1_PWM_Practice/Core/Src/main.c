@@ -274,6 +274,8 @@ int main(void)
   /* USER CODE BEGIN 2 */
   HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+  uint32_t last_serial_tick = HAL_GetTick();
+  static const uint8_t serial_message[] = "Hello from NUCLEO-G0B1RE!\r\n";
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -287,6 +289,13 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    uint32_t now = HAL_GetTick();
+    if ((uint32_t)(now - last_serial_tick) >= 10000U)
+    {
+      last_serial_tick = now;
+      HAL_UART_Transmit(&huart2, serial_message, sizeof(serial_message) - 1U, 100U);
+    }
+
     determine_btn_press_time();
     if( btn_press )
     {

@@ -40,7 +40,8 @@ typedef enum
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define TD1_GAP_PERIODS 10000U /* 10000 x 100 us = 1 s between pulse groups. */
+#define PB14_SCOPE_TEST 0 /* 1: GPIO scope test; 0: HRTIM TD1 sequence. */
+#define TD1_GAP_PERIODS 1U /* Minimum 1: 100 us between pulse groups. */
 
 /* USER CODE END PD */
 
@@ -57,6 +58,8 @@ HRTIM_HandleTypeDef hhrtim1;
 /* USER CODE BEGIN PV */
 static volatile TD1_SequenceState td1_sequence_state = TD1_SEQUENCE_IDLE;
 static uint32_t td1_gap_remaining;
+/* CMP1 controls TD1; CMP3 independently controls TD2. */
+static uint32_t active_compare = HRTIM_COMPAREUNIT_1;
 
 /* USER CODE END PV */
 
@@ -71,6 +74,34 @@ static void TD1_SequenceStart(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+#if PB14_SCOPE_TEST
+static void PB14_ScopeTest(void)
+{
+  GPIO_InitTypeDef gpio = {0};
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
+  gpio.Pin = GPIO_PIN_14;
+  gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &gpio);
+
+  /* Toggle every 5 ms: approximately 100 Hz, 50% duty.
+   * Standalone scope test; HRTIM and BSP initialization are bypassed.
+   */
+  uint32_t last_toggle = HAL_GetTick();
+  while (1)
+  {
+    uint32_t now = HAL_GetTick();
+    if ((uint32_t)(now - last_toggle) >= 5U)
+    {
+      last_toggle = now;
+      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);
+    }
+  }
+}
+#endif
 
 /* USER CODE END 0 */
 
@@ -98,6 +129,9 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
+#if PB14_SCOPE_TEST
+  PB14_ScopeTest(); /* Intentional standalone test; does not return. */
+#endif
 
   /* USER CODE END SysInit */
 
@@ -280,6 +314,19 @@ static void MX_HRTIM1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN HRTIM1_Init 2 */
+  /* TD2 uses CMP3 so zero duty can independently suppress its pulses. */
+  pCompareCfg.CompareValue = 0U;
+  if (HAL_HRTIM_WaveformCompareConfig(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D,
+                                     HRTIM_COMPAREUNIT_3, &pCompareCfg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  pOutputCfg.ResetSource = HRTIM_OUTPUTRESET_TIMCMP3;
+  if (HAL_HRTIM_WaveformOutputConfig(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D,
+                                    HRTIM_OUTPUT_TD2, &pOutputCfg) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   /* USER CODE END HRTIM1_Init 2 */
   HAL_HRTIM_MspPostInit(&hhrtim1);
@@ -312,13 +359,17 @@ static void MX_GPIO_Init(void)
 
 /* Repeating scope-test sequence, started once after MX_HRTIM1_Init().
  * Timer D: 340 MHz equivalent clock, PER = 34000 (100 us).
- * TD1: set on period, reset on CMP1; CMP1 = 0 suppresses the pulse.
+ * Both set on period; TD1 resets on CMP1, TD2 on CMP3.
+ * Zero compare suppresses the inactive channel. Alternate after each gap.
  */
 static void TD1_SequenceStart(void)
 {
   /* Load an inactive waveform while the counter/output are still stopped. */
   __HAL_HRTIM_SETCOMPARE(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D,
                         HRTIM_COMPAREUNIT_1, 0U);
+  __HAL_HRTIM_SETCOMPARE(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D,
+                        HRTIM_COMPAREUNIT_3, 0U);
+  active_compare = HRTIM_COMPAREUNIT_1;
   if (HAL_HRTIM_SoftwareUpdate(&hhrtim1, HRTIM_TIMERUPDATE_D) != HAL_OK)
   {
     Error_Handler();
@@ -334,7 +385,8 @@ static void TD1_SequenceStart(void)
                             HRTIM_TIM_IT_REP);
   HAL_NVIC_ClearPendingIRQ(HRTIM1_TIMD_IRQn);
 
-  if (HAL_HRTIM_WaveformOutputStart(&hhrtim1, HRTIM_OUTPUT_TD1) != HAL_OK)
+  if (HAL_HRTIM_WaveformOutputStart(&hhrtim1,
+                                   HRTIM_OUTPUT_TD1 | HRTIM_OUTPUT_TD2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -359,17 +411,17 @@ void HAL_HRTIM_RepetitionEventCallback(HRTIM_HandleTypeDef *hhrtim,
   switch (td1_sequence_state)
   {
     case TD1_SEQUENCE_QUEUE_20_PERCENT:
-      __HAL_HRTIM_SETCOMPARE(hhrtim, TimerIdx, HRTIM_COMPAREUNIT_1, 6800U);
+      __HAL_HRTIM_SETCOMPARE(hhrtim, TimerIdx, active_compare, 6800U);
       td1_sequence_state = TD1_SEQUENCE_QUEUE_30_PERCENT;
       break;
 
     case TD1_SEQUENCE_QUEUE_30_PERCENT:
-      __HAL_HRTIM_SETCOMPARE(hhrtim, TimerIdx, HRTIM_COMPAREUNIT_1, 10200U);
+      __HAL_HRTIM_SETCOMPARE(hhrtim, TimerIdx, active_compare, 10200U);
       td1_sequence_state = TD1_SEQUENCE_QUEUE_OFF;
       break;
 
     case TD1_SEQUENCE_QUEUE_OFF:
-      __HAL_HRTIM_SETCOMPARE(hhrtim, TimerIdx, HRTIM_COMPAREUNIT_1, 0U);
+      __HAL_HRTIM_SETCOMPARE(hhrtim, TimerIdx, active_compare, 0U);
       td1_sequence_state = TD1_SEQUENCE_WAIT_OFF;
       break;
 
@@ -378,14 +430,19 @@ void HAL_HRTIM_RepetitionEventCallback(HRTIM_HandleTypeDef *hhrtim,
        * Leave the output enabled at zero duty to keep actively driving low.
        * Queue the next group one boundary early to account for preload.
        */
-      td1_gap_remaining = TD1_GAP_PERIODS - 1U;
+      td1_gap_remaining = TD1_GAP_PERIODS;
       td1_sequence_state = TD1_SEQUENCE_GAP;
-      break;
+      /* Fall through: count the first blank period now. With a one-period
+       * gap, preload the next channel immediately for the next boundary.
+       */
 
     case TD1_SEQUENCE_GAP:
       if (--td1_gap_remaining == 0U)
       {
-        __HAL_HRTIM_SETCOMPARE(hhrtim, TimerIdx, HRTIM_COMPAREUNIT_1, 3400U);
+        /* Previous channel remains at zero; start the other next period. */
+        active_compare = (active_compare == HRTIM_COMPAREUNIT_1)
+                         ? HRTIM_COMPAREUNIT_3 : HRTIM_COMPAREUNIT_1;
+        __HAL_HRTIM_SETCOMPARE(hhrtim, TimerIdx, active_compare, 3400U);
         td1_sequence_state = TD1_SEQUENCE_QUEUE_20_PERCENT;
       }
       break;
