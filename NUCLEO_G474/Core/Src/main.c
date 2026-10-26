@@ -48,6 +48,12 @@ typedef enum
 /* USER CODE BEGIN PD */
 #define PB14_SCOPE_TEST 0 /* 1: GPIO scope test; 0: HRTIM TD1 sequence. */
 #define TD1_GAP_PERIODS 1U /* Minimum 1: 100 us between pulse groups. */
+#define HRTIM_TICKS_PER_US 340U /* 170 MHz HRTIM clock, MUL2. */
+#define NORMAL_PULSE_TICKS 170U /* 500 ns, independent of period. */
+#define NORMAL_REQUESTED_DELTA_US 100U
+#define NORMAL_PHASE_SLOTS 4U /* Reserve the fourth phase even without TF2. */
+#define BUTTON_DEBOUNCE_MS 20U
+#define BUTTON_SHORT_PRESS_MAX_MS 1000U
 
 /* USER CODE END PD */
 
@@ -77,6 +83,13 @@ static const struct
   {HRTIM_TIMERINDEX_TIMER_F, HRTIM_COMPAREUNIT_1}
 };
 static uint32_t active_channel;
+static const uint32_t normal_period_ticks[] = {34000U, 6800U, 3400U};
+static uint32_t normal_frequency_index;
+static uint32_t button_raw;
+static uint32_t button_stable;
+static uint32_t button_changed_at;
+static uint32_t button_pressed_at;
+static uint32_t button_press_armed;
 
 /* USER CODE END PV */
 
@@ -87,6 +100,9 @@ static void MX_HRTIM1_Init(void);
 /* USER CODE BEGIN PFP */
 static void TD1_SequenceStart(void);
 static void NormalMode_Enter(void);
+static void NormalMode_QueueWaveform(uint32_t frequency_index);
+static void Button_Poll(void);
+static void Button_OnShortPress(void);
 
 /* USER CODE END PFP */
 
@@ -163,8 +179,8 @@ int main(void)
   /* Initialize led */
   BSP_LED_Init(LED_GREEN);
 
-  /* Initialize USER push-button, will be used to trigger an interrupt each time it's pressed.*/
-  BSP_PB_Init(BUTTON_USER, BUTTON_MODE_EXTI);
+  /* Poll PC13 for debounced press/release pairs; no raw-edge actions. */
+  BSP_PB_Init(BUTTON_USER, BUTTON_MODE_GPIO);
 
   /* Initialize COM1 port (115200, 8 bits (7-bit data + 1 stop bit), no parity */
   BspCOMInit.BaudRate   = 115200;
@@ -179,18 +195,20 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  /* Start after the BSP button interrupt has been configured. */
+  /* Start after the button is configured. A held-at-reset button must first
+   * be released, then pressed, to produce a short-press event.
+   */
+  button_raw = (BSP_PB_GetState(BUTTON_USER) != 0) ? 1U : 0U;
+  button_stable = button_raw;
+  button_changed_at = HAL_GetTick();
   TD1_SequenceStart();
-  if (BSP_PB_GetState(BUTTON_USER) != 0)
-  {
-    BSP_PB_Callback(BUTTON_USER);
-  }
   while (1)
   {
 
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    Button_Poll();
   }
   /* USER CODE END 3 */
 }
@@ -465,17 +483,62 @@ static void TD1_SequenceStart(void)
   }
 }
 
-/* PC13 is active high; the BSP calls this on its rising EXTI edge.
- * Latch the first press: subsequent bounce/hold events cannot retrigger it.
+/* PC13 is active high. Both transitions must be stable for 20 ms.
+ * Emit once on release of a short press (at most 1 second); long holds do
+ * nothing. Release-to-rearm prevents the startup press also cycling Normal.
+ * No delays and no timing-critical work is done while the button is held.
+ */
+static void Button_Poll(void)
+{
+  uint32_t now = HAL_GetTick();
+  uint32_t raw = (BSP_PB_GetState(BUTTON_USER) != 0) ? 1U : 0U;
+
+  if (raw != button_raw)
+  {
+    button_raw = raw;
+    button_changed_at = now;
+  }
+  if ((raw == button_stable) ||
+      ((uint32_t)(now - button_changed_at) < BUTTON_DEBOUNCE_MS))
+  {
+    return;
+  }
+  button_stable = raw;
+  if (raw != 0U)
+  {
+    button_pressed_at = button_changed_at;
+    button_press_armed = 1U;
+  }
+  else
+  {
+    if ((button_press_armed != 0U) &&
+        ((uint32_t)(button_changed_at - button_pressed_at) <=
+         BUTTON_SHORT_PRESS_MAX_MS))
+    {
+      Button_OnShortPress();
+    }
+    button_press_armed = 0U;
+  }
+}
+
+/* Called only for a debounced short press.
  * Only active_channel can have a nonzero compare preload, including when
  * the next channel is queued during a gap. Clear that preload, not the
  * active register, so any pulse in progress finishes normally.
  */
-void BSP_PB_Callback(Button_TypeDef Button)
+static void Button_OnShortPress(void)
 {
+  if (app_mode == APP_MODE_NORMAL)
+  {
+    normal_frequency_index = (normal_frequency_index + 1U) %
+        (sizeof(normal_period_ticks) / sizeof(normal_period_ticks[0]));
+    NormalMode_QueueWaveform(normal_frequency_index);
+    return;
+  }
+
   uint32_t primask = __get_PRIMASK();
   __disable_irq();
-  if ((Button == BUTTON_USER) && (app_mode == APP_MODE_STARTUP) &&
+  if ((app_mode == APP_MODE_STARTUP) &&
       (td1_sequence_state != TD1_SEQUENCE_IDLE) &&
       (startup_abort_requested == 0U))
   {
@@ -495,15 +558,75 @@ void BSP_PB_Callback(Button_TypeDef Button)
   __set_PRIMASK(primask);
 }
 
-/* Called at a period boundary after the button has queued zero duty.
- * All compares have reached zero through preload; keep outputs enabled and
- * counters running to actively hold pins low. Normal Mode PWM is deferred.
+/* Normal mode uses a common period with 170-tick (500 ns) pulses:
+ * TD1: period -> D/CMP1; TD2: D/CMP2 -> D/CMP3;
+ * TF1: F/CMP2 -> F/CMP1. TF2 remains unconfigured/disabled.
+ * To add TF2 later, use F/CMP4 at 3*delta and F/CMP3 at 3*delta+width
+ * (use the period reset event if its falling edge equals the period).
+ * The requested delta is never overwritten by the clamped value.
+ * Integer division floors the maximum delta so all FOUR slots fit.
+ */
+static void NormalMode_QueueWaveform(uint32_t frequency_index)
+{
+  uint32_t period = normal_period_ticks[frequency_index];
+  uint32_t delta = NORMAL_REQUESTED_DELTA_US * HRTIM_TICKS_PER_US;
+  uint32_t max_delta = (period - NORMAL_PULSE_TICKS) /
+             (NORMAL_PHASE_SLOTS - 1U);
+  if (delta > max_delta)
+  {
+  delta = max_delta;
+  }
+
+  /* RM0440 table 244: period, compare AND SET/RST registers are preloaded.
+   * D/F have aligned counters and identical periods. Inhibit both updates
+   * in one common-register write so even a rollover during these writes
+   * keeps the entire old waveform. Re-enable together; the NEXT common
+   * rollover applies the complete new waveform. Never force a live update.
+   */
+  SET_BIT(hhrtim1.Instance->sCommonRegs.CR1,
+      HRTIM_CR1_TDUDIS | HRTIM_CR1_TFUDIS);
+  __DSB();
+  __HAL_HRTIM_SETPERIOD(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D, period);
+  __HAL_HRTIM_SETPERIOD(&hhrtim1, HRTIM_TIMERINDEX_TIMER_F, period);
+  __HAL_HRTIM_SETCOMPARE(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D,
+            HRTIM_COMPAREUNIT_1, NORMAL_PULSE_TICKS);
+  __HAL_HRTIM_SETCOMPARE(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D,
+            HRTIM_COMPAREUNIT_2, delta);
+  __HAL_HRTIM_SETCOMPARE(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D,
+            HRTIM_COMPAREUNIT_3, delta + NORMAL_PULSE_TICKS);
+  __HAL_HRTIM_SETCOMPARE(&hhrtim1, HRTIM_TIMERINDEX_TIMER_F,
+            HRTIM_COMPAREUNIT_2, 2U * delta);
+  __HAL_HRTIM_SETCOMPARE(&hhrtim1, HRTIM_TIMERINDEX_TIMER_F,
+            HRTIM_COMPAREUNIT_1, 2U * delta + NORMAL_PULSE_TICKS);
+
+  hhrtim1.Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_D].SETx1R =
+    HRTIM_OUTPUTSET_TIMPER;
+  hhrtim1.Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_D].RSTx1R =
+    HRTIM_OUTPUTRESET_TIMCMP1;
+  hhrtim1.Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_D].SETx2R =
+    HRTIM_OUTPUTSET_TIMCMP2;
+  hhrtim1.Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_D].RSTx2R =
+    HRTIM_OUTPUTRESET_TIMCMP3;
+  hhrtim1.Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_F].SETx1R =
+    HRTIM_OUTPUTSET_TIMCMP2;
+  hhrtim1.Instance->sTimerxRegs[HRTIM_TIMERINDEX_TIMER_F].RSTx1R =
+    HRTIM_OUTPUTRESET_TIMCMP1;
+  __DSB();
+  CLEAR_BIT(hhrtim1.Instance->sCommonRegs.CR1,
+      HRTIM_CR1_TDUDIS | HRTIM_CR1_TFUDIS);
+}
+
+/* Enter after startup has reached zero at a period boundary. Queue Normal
+ * at 10 kHz for the next boundary, leaving one blank handover period.
+ * Normal mode is entirely hardware-driven; no 100 kHz PWM ISR is needed.
  */
 static void NormalMode_Enter(void)
 {
   __HAL_HRTIM_TIMER_DISABLE_IT(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D,
                               HRTIM_TIM_IT_REP);
   td1_sequence_state = TD1_SEQUENCE_IDLE;
+  normal_frequency_index = 0U;
+  NormalMode_QueueWaveform(normal_frequency_index);
   app_mode = APP_MODE_NORMAL;
 }
 
