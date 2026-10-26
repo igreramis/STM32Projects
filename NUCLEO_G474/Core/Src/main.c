@@ -28,6 +28,12 @@
 /* USER CODE BEGIN PTD */
 typedef enum
 {
+  APP_MODE_STARTUP,
+  APP_MODE_NORMAL
+} AppMode;
+
+typedef enum
+{
   TD1_SEQUENCE_IDLE,
   TD1_SEQUENCE_QUEUE_20_PERCENT,
   TD1_SEQUENCE_QUEUE_30_PERCENT,
@@ -56,6 +62,8 @@ COM_InitTypeDef BspCOMInit;
 HRTIM_HandleTypeDef hhrtim1;
 
 /* USER CODE BEGIN PV */
+static volatile AppMode app_mode = APP_MODE_STARTUP;
+static volatile uint32_t startup_abort_requested;
 static volatile TD1_SequenceState td1_sequence_state = TD1_SEQUENCE_IDLE;
 static uint32_t td1_gap_remaining;
 /* Ordered outputs: TD1 (PB14), TD2 (PB15), TF1 (PC6). */
@@ -78,6 +86,7 @@ static void MX_GPIO_Init(void);
 static void MX_HRTIM1_Init(void);
 /* USER CODE BEGIN PFP */
 static void TD1_SequenceStart(void);
+static void NormalMode_Enter(void);
 
 /* USER CODE END PFP */
 
@@ -148,7 +157,6 @@ int main(void)
   MX_GPIO_Init();
   MX_HRTIM1_Init();
   /* USER CODE BEGIN 2 */
-  TD1_SequenceStart();
 
   /* USER CODE END 2 */
 
@@ -171,6 +179,12 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  /* Start after the BSP button interrupt has been configured. */
+  TD1_SequenceStart();
+  if (BSP_PB_GetState(BUTTON_USER) != 0)
+  {
+    BSP_PB_Callback(BUTTON_USER);
+  }
   while (1)
   {
 
@@ -398,13 +412,13 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-/* Repeating scope-test sequence, started once after MX_HRTIM1_Init().
+/* Cyclic startup sequence, stopped only by the PC13 user button.
  * Timers D/F: 340 MHz equivalent clock, PER = 34000 (100 us).
  * TD1 uses D/CMP1, TD2 uses D/CMP3, TF1 uses F/CMP1; all set on period.
- * TD1 -> blank period -> TD2 -> blank period -> TF1 -> blank period -> TD1.
+ * TD1 -> blank period -> TD2 -> blank period -> TF1 -> blank -> TD1.
  * Each group is three full periods at 10%, 20%, 30% (300 us).
  * The 100 us gap starts after the third full period, not its falling edge.
- * Zero compare suppresses inactive channels; the complete cycle is 1.2 ms.
+ * Zero compare suppresses inactive channels; the cycle takes 1.2 ms.
  */
 static void TD1_SequenceStart(void)
 {
@@ -417,6 +431,8 @@ static void TD1_SequenceStart(void)
                           sequence_channels[channel].compare_unit, 0U);
   }
   active_channel = 0U;
+  startup_abort_requested = 0U;
+  app_mode = APP_MODE_STARTUP;
   if (HAL_HRTIM_SoftwareUpdate(&hhrtim1,
                                HRTIM_TIMERUPDATE_D | HRTIM_TIMERUPDATE_F) != HAL_OK)
   {
@@ -449,11 +465,60 @@ static void TD1_SequenceStart(void)
   }
 }
 
+/* PC13 is active high; the BSP calls this on its rising EXTI edge.
+ * Latch the first press: subsequent bounce/hold events cannot retrigger it.
+ * Only active_channel can have a nonzero compare preload, including when
+ * the next channel is queued during a gap. Clear that preload, not the
+ * active register, so any pulse in progress finishes normally.
+ */
+void BSP_PB_Callback(Button_TypeDef Button)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if ((Button == BUTTON_USER) && (app_mode == APP_MODE_STARTUP) &&
+      (td1_sequence_state != TD1_SEQUENCE_IDLE) &&
+      (startup_abort_requested == 0U))
+  {
+    __HAL_HRTIM_SETCOMPARE(&hhrtim1,
+                          sequence_channels[active_channel].timer_index,
+                          sequence_channels[active_channel].compare_unit, 0U);
+    __DSB();
+    startup_abort_requested = 1U;
+    /* Discard any repetition interrupt predating the preload write.
+     * The next fresh boundary will have applied zero before entering Normal.
+     * IRQ masking prevents the sequence ISR from queuing another pulse.
+     */
+    __HAL_HRTIM_TIMER_CLEAR_IT(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D,
+                              HRTIM_TIM_IT_REP);
+    HAL_NVIC_ClearPendingIRQ(HRTIM1_TIMD_IRQn);
+  }
+  __set_PRIMASK(primask);
+}
+
+/* Called at a period boundary after the button has queued zero duty.
+ * All compares have reached zero through preload; keep outputs enabled and
+ * counters running to actively hold pins low. Normal Mode PWM is deferred.
+ */
+static void NormalMode_Enter(void)
+{
+  __HAL_HRTIM_TIMER_DISABLE_IT(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D,
+                              HRTIM_TIM_IT_REP);
+  td1_sequence_state = TD1_SEQUENCE_IDLE;
+  app_mode = APP_MODE_NORMAL;
+}
+
 void HAL_HRTIM_RepetitionEventCallback(HRTIM_HandleTypeDef *hhrtim,
                                       uint32_t TimerIdx)
 {
-  if ((hhrtim != &hhrtim1) || (TimerIdx != HRTIM_TIMERINDEX_TIMER_D))
+  if ((hhrtim != &hhrtim1) || (TimerIdx != HRTIM_TIMERINDEX_TIMER_D) ||
+      (app_mode != APP_MODE_STARTUP))
   {
+    return;
+  }
+
+  if (startup_abort_requested != 0U)
+  {
+    NormalMode_Enter();
     return;
   }
 
@@ -495,9 +560,9 @@ void HAL_HRTIM_RepetitionEventCallback(HRTIM_HandleTypeDef *hhrtim,
     case TD1_SEQUENCE_GAP:
       if (--td1_gap_remaining == 0U)
       {
-        /* Previous channel stays at zero; rotate TD1 -> TD2 -> TF1. */
+        /* Wrap through the configured outputs until the user presses PC13. */
         active_channel = (active_channel + 1U) %
-                         (sizeof(sequence_channels) / sizeof(sequence_channels[0]));
+             (sizeof(sequence_channels) / sizeof(sequence_channels[0]));
         __HAL_HRTIM_SETCOMPARE(hhrtim, sequence_channels[active_channel].timer_index,
                               sequence_channels[active_channel].compare_unit, 3400U);
         td1_sequence_state = TD1_SEQUENCE_QUEUE_20_PERCENT;
