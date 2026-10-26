@@ -133,6 +133,12 @@ void HAL_HRTIM_MspPostInit(HRTIM_HandleTypeDef* hhrtim)
     GPIO_InitStruct.Pin = GPIO_PIN_15;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+    /* PC6: HRTIM1_CHF1 (AF13). */
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+    GPIO_InitStruct.Pin = GPIO_PIN_6;
+    GPIO_InitStruct.Alternate = GPIO_AF13_HRTIM1;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
     /* USER CODE END HRTIM1_MspPostInit 1 */
   }
 

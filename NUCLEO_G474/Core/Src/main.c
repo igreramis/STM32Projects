@@ -58,8 +58,17 @@ HRTIM_HandleTypeDef hhrtim1;
 /* USER CODE BEGIN PV */
 static volatile TD1_SequenceState td1_sequence_state = TD1_SEQUENCE_IDLE;
 static uint32_t td1_gap_remaining;
-/* CMP1 controls TD1; CMP3 independently controls TD2. */
-static uint32_t active_compare = HRTIM_COMPAREUNIT_1;
+/* Ordered outputs: TD1 (PB14), TD2 (PB15), TF1 (PC6). */
+static const struct
+{
+  uint32_t timer_index;
+  uint32_t compare_unit;
+} sequence_channels[] = {
+  {HRTIM_TIMERINDEX_TIMER_D, HRTIM_COMPAREUNIT_1},
+  {HRTIM_TIMERINDEX_TIMER_D, HRTIM_COMPAREUNIT_3},
+  {HRTIM_TIMERINDEX_TIMER_F, HRTIM_COMPAREUNIT_1}
+};
+static uint32_t active_channel;
 
 /* USER CODE END PV */
 
@@ -328,6 +337,38 @@ static void MX_HRTIM1_Init(void)
     Error_Handler();
   }
 
+  /* TF1 has its own timer, with the same period, prescaler and preload.
+   * Only Timer D interrupts; its callback queues all three outputs.
+   */
+  if (HAL_HRTIM_TimeBaseConfig(&hhrtim1, HRTIM_TIMERINDEX_TIMER_F,
+                              &pTimeBaseCfg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_HRTIM_WaveformTimerControl(&hhrtim1, HRTIM_TIMERINDEX_TIMER_F,
+                                    &pTimerCtl) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  pTimerCfg.InterruptRequests = HRTIM_TIM_IT_NONE;
+  pTimerCfg.DelayedProtectionMode = HRTIM_TIMER_F_DELAYEDPROTECTION_DISABLED;
+  if (HAL_HRTIM_WaveformTimerConfig(&hhrtim1, HRTIM_TIMERINDEX_TIMER_F,
+                                   &pTimerCfg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_HRTIM_WaveformCompareConfig(&hhrtim1, HRTIM_TIMERINDEX_TIMER_F,
+                                     HRTIM_COMPAREUNIT_1, &pCompareCfg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  pOutputCfg.ResetSource = HRTIM_OUTPUTRESET_TIMCMP1;
+  if (HAL_HRTIM_WaveformOutputConfig(&hhrtim1, HRTIM_TIMERINDEX_TIMER_F,
+                                    HRTIM_OUTPUT_TF1, &pOutputCfg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
   /* USER CODE END HRTIM1_Init 2 */
   HAL_HRTIM_MspPostInit(&hhrtim1);
 
@@ -358,24 +399,32 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* Repeating scope-test sequence, started once after MX_HRTIM1_Init().
- * Timer D: 340 MHz equivalent clock, PER = 34000 (100 us).
- * Both set on period; TD1 resets on CMP1, TD2 on CMP3.
- * Zero compare suppresses the inactive channel. Alternate after each gap.
+ * Timers D/F: 340 MHz equivalent clock, PER = 34000 (100 us).
+ * TD1 uses D/CMP1, TD2 uses D/CMP3, TF1 uses F/CMP1; all set on period.
+ * TD1 -> blank period -> TD2 -> blank period -> TF1 -> blank period -> TD1.
+ * Each group is three full periods at 10%, 20%, 30% (300 us).
+ * The 100 us gap starts after the third full period, not its falling edge.
+ * Zero compare suppresses inactive channels; the complete cycle is 1.2 ms.
  */
 static void TD1_SequenceStart(void)
 {
   /* Load an inactive waveform while the counter/output are still stopped. */
-  __HAL_HRTIM_SETCOMPARE(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D,
-                        HRTIM_COMPAREUNIT_1, 0U);
-  __HAL_HRTIM_SETCOMPARE(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D,
-                        HRTIM_COMPAREUNIT_3, 0U);
-  active_compare = HRTIM_COMPAREUNIT_1;
-  if (HAL_HRTIM_SoftwareUpdate(&hhrtim1, HRTIM_TIMERUPDATE_D) != HAL_OK)
+  for (uint32_t channel = 0U;
+       channel < sizeof(sequence_channels) / sizeof(sequence_channels[0]);
+       ++channel)
+  {
+    __HAL_HRTIM_SETCOMPARE(&hhrtim1, sequence_channels[channel].timer_index,
+                          sequence_channels[channel].compare_unit, 0U);
+  }
+  active_channel = 0U;
+  if (HAL_HRTIM_SoftwareUpdate(&hhrtim1,
+                               HRTIM_TIMERUPDATE_D | HRTIM_TIMERUPDATE_F) != HAL_OK)
   {
     Error_Handler();
   }
   __DSB();
   __HAL_HRTIM_SETCOUNTER(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D, 0U);
+  __HAL_HRTIM_SETCOUNTER(&hhrtim1, HRTIM_TIMERINDEX_TIMER_F, 0U);
 
   /* First rollover loads 10% and starts pulse 1 after a blank 100 us period. */
   __HAL_HRTIM_SETCOMPARE(&hhrtim1, HRTIM_TIMERINDEX_TIMER_D,
@@ -386,11 +435,15 @@ static void TD1_SequenceStart(void)
   HAL_NVIC_ClearPendingIRQ(HRTIM1_TIMD_IRQn);
 
   if (HAL_HRTIM_WaveformOutputStart(&hhrtim1,
-                                   HRTIM_OUTPUT_TD1 | HRTIM_OUTPUT_TD2) != HAL_OK)
+                                   HRTIM_OUTPUT_TD1 | HRTIM_OUTPUT_TD2 |
+                                   HRTIM_OUTPUT_TF1) != HAL_OK)
   {
     Error_Handler();
   }
-  if (HAL_HRTIM_WaveformCountStart_IT(&hhrtim1, HRTIM_TIMERID_TIMER_D) != HAL_OK)
+  /* One MCR write starts both counters on the same clock edge. */
+  if (HAL_HRTIM_WaveformCountStart_IT(&hhrtim1,
+                                     HRTIM_TIMERID_TIMER_D |
+                                     HRTIM_TIMERID_TIMER_F) != HAL_OK)
   {
     Error_Handler();
   }
@@ -411,17 +464,20 @@ void HAL_HRTIM_RepetitionEventCallback(HRTIM_HandleTypeDef *hhrtim,
   switch (td1_sequence_state)
   {
     case TD1_SEQUENCE_QUEUE_20_PERCENT:
-      __HAL_HRTIM_SETCOMPARE(hhrtim, TimerIdx, active_compare, 6800U);
+      __HAL_HRTIM_SETCOMPARE(hhrtim, sequence_channels[active_channel].timer_index,
+                            sequence_channels[active_channel].compare_unit, 6800U);
       td1_sequence_state = TD1_SEQUENCE_QUEUE_30_PERCENT;
       break;
 
     case TD1_SEQUENCE_QUEUE_30_PERCENT:
-      __HAL_HRTIM_SETCOMPARE(hhrtim, TimerIdx, active_compare, 10200U);
+      __HAL_HRTIM_SETCOMPARE(hhrtim, sequence_channels[active_channel].timer_index,
+                            sequence_channels[active_channel].compare_unit, 10200U);
       td1_sequence_state = TD1_SEQUENCE_QUEUE_OFF;
       break;
 
     case TD1_SEQUENCE_QUEUE_OFF:
-      __HAL_HRTIM_SETCOMPARE(hhrtim, TimerIdx, active_compare, 0U);
+      __HAL_HRTIM_SETCOMPARE(hhrtim, sequence_channels[active_channel].timer_index,
+                            sequence_channels[active_channel].compare_unit, 0U);
       td1_sequence_state = TD1_SEQUENCE_WAIT_OFF;
       break;
 
@@ -439,10 +495,11 @@ void HAL_HRTIM_RepetitionEventCallback(HRTIM_HandleTypeDef *hhrtim,
     case TD1_SEQUENCE_GAP:
       if (--td1_gap_remaining == 0U)
       {
-        /* Previous channel remains at zero; start the other next period. */
-        active_compare = (active_compare == HRTIM_COMPAREUNIT_1)
-                         ? HRTIM_COMPAREUNIT_3 : HRTIM_COMPAREUNIT_1;
-        __HAL_HRTIM_SETCOMPARE(hhrtim, TimerIdx, active_compare, 3400U);
+        /* Previous channel stays at zero; rotate TD1 -> TD2 -> TF1. */
+        active_channel = (active_channel + 1U) %
+                         (sizeof(sequence_channels) / sizeof(sequence_channels[0]));
+        __HAL_HRTIM_SETCOMPARE(hhrtim, sequence_channels[active_channel].timer_index,
+                              sequence_channels[active_channel].compare_unit, 3400U);
         td1_sequence_state = TD1_SEQUENCE_QUEUE_20_PERCENT;
       }
       break;
