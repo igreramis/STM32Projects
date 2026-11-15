@@ -95,6 +95,7 @@ class OtaJobs:
                 not callable(installer) or not callable(clock)):
             raise ValueError("invalid_ota_configuration")
         self.client_id = client_id
+        self.install_enabled = True
         self.installer = installer
         self.clock = clock
         self.stop_event = threading.Event()  # Never the gateway's transport event.
@@ -261,6 +262,8 @@ class OtaJobs:
                         else self._reject(command_id, "command_id_reused"))
             if self._closed or self.stop_event.is_set():
                 return self._reject(command_id, "coordinator_closed")
+            if not self.install_enabled:
+                return self._reject(command_id, "deployment_disabled")
             now = self.clock()
             if not math.isfinite(now) or not now < command["expires_at"] <= now + 1800:
                 return self._reject(command_id, "command_expired")
@@ -440,7 +443,7 @@ class OtaJobs:
             config = json.loads(config_path.read_text(encoding="utf-8"),
                                 object_pairs_hook=_unique_object)
             required = {"catalog", "release_root", "baseline", "run_root", "state_root", "port"}
-            optional = {"download_releases", "signed_releases", "uart_monitor"}
+            optional = {"download_releases", "signed_releases", "uart_monitor", "install_enabled"}
             if type(config) is not dict or not required <= set(config) or set(config) - required - optional:
                 raise ValueError
 
@@ -465,7 +468,8 @@ class OtaJobs:
                 from verified_state import VerifiedState
                 kwargs["predecessor_state"] = VerifiedState(Path(kwargs["state_root"]) / "verified-flash", signing["seed_version"])
             monitor_enabled = config.get("uart_monitor", False)
-            if type(monitor_enabled) is not bool:
+            install_enabled = config.get("install_enabled", True)
+            if type(monitor_enabled) is not bool or type(install_enabled) is not bool:
                 raise ValueError
         except Exception:
             raise ValueError("invalid_ota_config") from None
@@ -478,6 +482,7 @@ class OtaJobs:
             monitor = StateMonitor(kwargs["port"])
             installer = MonitoredInstaller(installer, monitor)
         jobs = cls(client_id, state_root, installer)
+        jobs.install_enabled = install_enabled
         jobs.monitor = monitor
         return jobs
 

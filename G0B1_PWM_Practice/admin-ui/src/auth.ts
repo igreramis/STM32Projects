@@ -21,7 +21,7 @@ export function oidcSettings(config: z.infer<typeof configSchema>, storage: Stor
   const domain = config.cognitoDomain.replace(/\/$/, '')
   return {
     authority: domain, client_id: config.userPoolClientId, redirect_uri: config.redirectUri,
-    response_type: 'code', scope: 'openid email admin-api/access', disablePKCE: false,
+    response_type: 'code', scope: 'openid profile admin-api/access', disablePKCE: false,
     automaticSilentRenew: false, loadUserInfo: false, monitorSession: false,
     // Hosted Cognito domains do not expose discovery. The five-field runtime
     // contract supplies the domain, so configure its standard OAuth endpoints.

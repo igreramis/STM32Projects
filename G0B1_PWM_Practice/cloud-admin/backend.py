@@ -3,6 +3,7 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -11,10 +12,13 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+LOGGER = logging.getLogger(__name__)
+
 GATEWAY = "pi-lab-01"
 DEVICE = "stm32g0b1-01"
 TARGET = "stm32g0b1"
 PREFIX = "firmware/stm32g0b1/"
+SOURCE_CLOCK_SKEW_SECONDS = 0.1
 SEMVER = re.compile(r"(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\Z")
 STATES = {"idle", "ready", "running", "paused", "fault"}
 PHASES = ("accepted", "preparing", "downloading", "image_validated", "waiting_for_rom",
@@ -77,7 +81,7 @@ def binary(data, expected_version):
     if not version(expected_version) or not 8 <= len(data) <= 20 * 1024:
         raise Fault("invalid_firmware")
     sp, reset = struct.unpack_from("<II", data)
-    if not 0x20000000 <= sp <= 0x20024000 or sp % 8:
+    if not 0x20000000 < sp <= 0x20024000 or sp % 8:
         raise Fault("invalid_vectors")
     if not reset & 1 or not 0x08000008 <= (reset & ~1) < 0x08000000 + len(data):
         raise Fault("invalid_vectors")
@@ -136,6 +140,10 @@ class Admin:
 
     def http(self, event):
         try:
+            # Preflight carries no bearer token and must never read or mutate data.
+            # Origin/method/header policy is enforced by API Gateway CORS settings.
+            if event.get("requestContext", {}).get("http", {}).get("method") == "OPTIONS":
+                return {"statusCode": 204, "headers": {"cache-control": "no-store"}, "body": ""}
             self.authenticate(event)
             method = event["requestContext"]["http"]["method"]
             path = event.get("rawPath", "")
@@ -153,6 +161,8 @@ class Admin:
             elif method == "GET" and path == "/api/deployments":
                 result = {"deployments": [projection(r, JOB_FIELDS) for r in self.store.list("job")]}
             elif method == "POST" and path == "/api/deployments":
+                if os.environ.get("FIRMWARE_DEPLOYMENT_ENABLED") == "false":
+                    raise Fault("deployment_disabled", 403)
                 result = self.deploy(self.body(event, ("device_id", "release_id", "request_id")))
             else:
                 raise Fault("not_found", 404)
@@ -322,7 +332,12 @@ class Admin:
                     event.get("ingest_client_id") != GATEWAY or event.get("device_id") != GATEWAY):
                 raise Fault("invalid_identity")
             received = event.get("ingest_received_at")
-            if not integer(received, 2**53) or not 0 <= self.clock() - received / 1000 <= 35:
+            if not integer(received, 2**53):
+                raise Fault("stale_event")
+            broker_delta = self.clock() - received / 1000
+            if not 0 <= broker_delta <= 35:
+                # Fixed codes and validated numeric deltas only; never log the event.
+                LOGGER.warning("ingest_rejected code=broker_clock delta_seconds=%s", broker_delta)
                 raise Fault("stale_event")
             if kind == "telemetry":
                 self.telemetry(event, received / 1000)
@@ -340,7 +355,11 @@ class Admin:
         boot = event.get("boot_id")
         count = event.get("telemetry_count")
         if (not isinstance(boot, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", boot) or
-                not integer(count, 2**53) or not 0 <= received - source <= 35):
+                not integer(count, 2**53)):
+            raise Fault("invalid_telemetry")
+        source_delta = received - source
+        if not -SOURCE_CLOCK_SKEW_SECONDS <= source_delta <= 35:
+            LOGGER.warning("ingest_rejected code=source_clock delta_seconds=%s", source_delta)
             raise Fault("invalid_telemetry")
         subs = event.get("subdevices")
         if not isinstance(subs, list) or len(subs) != 1 or not isinstance(subs[0], dict):
@@ -363,15 +382,29 @@ class Admin:
                 raise Fault("invalid_observation")
         else:
             observed = timestamp(last)
-            if (type(age) not in (int, float) or not math.isfinite(age) or not 0 <= age <= 2**31 or
-                    not 0 <= source - observed or abs(source - observed - age) > 3 or
-                    not version(sample["firmware"]) or sample["state"] not in STATES or
-                    not integer(sample["sequence"])):
+            state_valid = ((sample["state"] is None and sample["sequence"] is None) or
+                           (sample["state"] in STATES and integer(sample["sequence"])))
+            if type(age) not in (int, float) or not math.isfinite(age) or not 0 <= age <= 2**31:
+                raise Fault("invalid_observation")
+            observation_delta = source - observed
+            if not 0 <= observation_delta:
+                LOGGER.warning("ingest_rejected code=observation_future delta_seconds=%s", observation_delta)
+                raise Fault("invalid_observation")
+            age_delta = observation_delta - age
+            if abs(age_delta) > 3:
+                LOGGER.warning("ingest_rejected code=observation_age delta_seconds=%s", age_delta)
+                raise Fault("invalid_observation")
+            if not version(sample["firmware"]) or not state_valid:
                 raise Fault("invalid_observation")
             # The UART observation time, never the MQTT publication, drives last_seen.
             if sub.get("seen") is None or observed > sub["seen"]:
                 sub.update(seen=observed, firmware=sample["firmware"], state=sample["state"],
                            sequence=sample["sequence"])
+            elif (observed == sub["seen"] and sample["firmware"] == sub.get("firmware") and
+                  sample["state"] is None):
+                # The monitor can expire operating state on a repeated snapshot.
+                # Clear that evidence without fabricating a new UART observation.
+                sub.update(state=None, sequence=None)
         sub["updating"] = sample["updating"]
         updated = {"seen": source, "boot_id": boot, "count": count, "sub": sub}
         changes = [("observation", GATEWAY, old, updated)]

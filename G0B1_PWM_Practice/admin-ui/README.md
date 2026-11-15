@@ -1,67 +1,97 @@
-# React + TypeScript + Vite
+# Relay / Edge Operations
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + TypeScript + Vite admin console for gateway/subdevice observations,
+firmware upload/approval, and deployment history. No AWS SDK, embedded credentials,
+external fonts, analytics, automatic deployment, or automatic rollback.
 
-Currently, two official plugins are available:
+**Live UI:** https://dw4cy96r64rff.cloudfront.net/
+See [hosting](../docs/ADMIN-FRONTEND-HOSTING.md) and the
+[deployment record](../docs/ADMIN-BACKEND-DEPLOYMENT.md) for operational evidence.
+Firmware installation remains disabled in cloud and gateway configuration.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Local development and demo
 
-## React Compiler
+Use Node 22.12+; this workstation's Node is at
+`/home/wh/.local/share/ota-node/bin` (prepend it to PATH for npm/node).
+Check for another running npm installation before installing dependencies.
+Scripts: `npm run dev`, `npm run build`, `npm run lint`, `npm test`,
+`npm run test:watch`, and `npm run preview`.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Open the Vite URL with **?demo=1** for an explicitly labeled demo. It selects
+in-memory fixtures before runtime configuration, authentication, or API fetches;
+uploads, approvals, deployment progress, hashes and verification flags are
+simulated. Reload resets fixtures. Loading static application assets still
+requires the host. Missing live configuration never falls back to demo.
 
-## Expanding the ESLint configuration
+**Localhost live authentication is no longer registered in the deployed Cognito
+client.** Use the hosted origin for live login; explicit local demo still works.
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Runtime configuration and authentication
 
-```js
-export default defineConfig([
-  # Relay / Edge Operations
+The host serves a no-store JSON object at `/config.json`; see
+[public/config.example.json](public/config.example.json). Local Vite reads
+[public/config.json](public/config.json), but the hosted publisher generates
+configuration from stack outputs rather than uploading that local file.
 
-  Frontend-only React + TypeScript admin console for the existing gateway and subdevice API. No AWS SDK, embedded credentials, automatic deployment, automatic rollback, external fonts, or analytics.
+| Field | Meaning |
+| --- | --- |
+| `apiBaseUrl` | HTTPS API base, without the `/api` route segment |
+| `cognitoDomain` | Full HTTPS hosted-login domain, no path |
+| `userPoolClientId` | Public app client ID, no secret |
+| `redirectUri` | Exact registered callback/logout URL, on the UI origin |
+| `region` | `ap-southeast-2` for this deployment |
 
-  ## Local development
+Use authorization code + S256 PKCE with **`openid profile admin-api/access`**
+(not `email`). The backend enforces access-token issuer/client, scope and `admins`
+membership. Only access tokens go to the API. `oidc-client-ts` stores user/state
+in sessionStorage, never localStorage, and uses explicit hosted-domain OAuth
+endpoints rather than hosted-domain discovery. Callback query parameters are
+removed after processing; raw exceptions, URLs and tokens are not logged/displayed.
 
-  Use Node 22.12+ (this workspace has Node at `/home/wh/.local/share/ota-node/bin`; prepend that directory to PATH for every npm/node command). Dependencies are already installed. Before any future install, check that no other npm installation is running.
+Sign-out clears the local OIDC user and redirects to Cognito logout. Expiration
+locks actions until explicit sign-in; no silent refresh iframe or background login.
+The deployed callback/logout is the root URL with trailing slash. The runtime
+accepts HTTP only for localhost/127.0.0.1 callbacks, which does not register them
+with Cognito or change deployed CORS.
 
-  Scripts: `npm run dev`, `npm run build`, `npm run lint`, `npm test`, `npm run test:watch`, `npm run preview`.
+## Behavior and safety
 
-  Open the local Vite URL with **?demo=1** for a conspicuously labeled demo. This branch is selected before configuration loading or OIDC initialization. It uses in-memory fixtures for all reads/uploads/approvals/deployments and never invokes fetch or authentication. Demo progress is simulated; hashes and verification flags are fixtures. Reload resets demo data. Static frontend asset requests are still needed to load the application.
+- Connectivity requires the API online flag and a nonfuture observation no older
+  than 35 seconds; subdevices also require a fresh gateway. State, firmware and
+  updating are separate last-known observations, not inferred installation proof.
+- Sequential snapshot polling waits five seconds after completion. Requests have
+  a 15-second bound and abort cleanup. Failure preserves last-known data but locks
+  new deployment; errors are sanitized and recovery is explicit.
+- Upload validates numeric semver, safe `.bin` names, 8-byte–20-KiB size, vectors
+  and embedded version; the server remains authoritative. Upload never approves
+  or deploys automatically. An uncertain upload may reserve a version: do not
+  blindly retry.
+- Deployment confirmation requires the sole target, an approved release, fresh
+  gateway/subdevice, reported firmware and no updating/active job. Preconditions
+  are rechecked on confirmation. These UI gates do not override cloud disablement.
+- A UUID is persisted before deployment POST. Uncertain results retain the exact
+  target/release/request tuple across reload and same-tab reauthentication,
+  scoped to API/client/user. Explicit confirmed retries reuse that UUID; no
+  automatic POST retry or ambiguous republish. History reconciles pending work;
+  corrupt/unavailable persistence fails closed.
+- `dispatch_unknown` remains blocking even with visible `error` status. Progress
+  uses reported stages, not elapsed time; flash/application verification remain
+  distinct and are never inferred from dispatch.
+- Onboarding and Telemetry tabs are intentionally disabled, including on mobile.
 
-  Without the explicit flag, the console requires real configuration and sign-in. Missing configuration never falls back to demo.
+## Validation and limits
 
-  ## Runtime configuration and authentication
+Vitest/Testing Library tests are offline; unexpected fetches reject by default.
+Prior recorded evidence: **47 UI tests, build and lint passed**. Hosted authenticated
+GETs for devices/releases/deployments returned 200, and logout → Cognito login →
+dashboard was observed with the user entering the password. Both devices were
+online, STM32 firmware 0.3.0, with 0.4.0 approved.
 
-  Serve a JSON object at **/config.json** with the five fields shown in [public/config.example.json](public/config.example.json). For local Vite use, provide it as public/config.json. The example is not live configuration and no deployment-specific values are invented or bundled.
+Prior audit: **0 runtime vulnerabilities; 7 moderate development lint-chain
+findings**, involving `minimatch` 10.2.6, GHSA-g3hv-75wg-m249. Review dependency
+compatibility; do not blindly force a downgrade.
 
-  | Field | Meaning |
-  | --- | --- |
-  | apiBaseUrl | HTTPS API origin/base path, without the trailing /api route segment |
-  | cognitoDomain | Full HTTPS Cognito hosted domain, without a path |
-  | userPoolClientId | Public app client ID, without a client secret |
-  | redirectUri | Exact registered callback and logout URI on the UI origin |
-  | region | AWS region, e.g. ap-southeast-2 |
-
-  Use HTTPS for deployed UI and API. HTTP callbacks are accepted only for localhost/127.0.0.1 development. Serve configuration with no-store caching. Register the exact redirect URI as both an allowed callback and sign-out URL. The static host must serve the app at the callback path (a root callback is simplest). Allow the UI origin and Authorization/Content-Type headers in API CORS.
-
-  Cognito must enable authorization code + PKCE, `openid`, `email`, and `admin-api/access`. The signed-in account must belong to `admins`; authorization remains server-enforced. `oidc-client-ts` manages OAuth state and tokens in sessionStorage, never localStorage. Its hosted-domain OAuth endpoints are explicitly configured because Cognito hosted domains do not provide OIDC discovery. Only access tokens are sent to the API. No raw exceptions, URLs, or token values are logged or displayed.
-
-  Sign-out clears the local OIDC user and redirects to the Cognito logout endpoint. Token expiration locks actions and asks for sign-in; no hidden refresh iframe or background login is used. Pending deployment identities survive reauthentication within the same tab and are scoped to API/client/user.
-
-  ## Safety and behavior
-
-  - Connectivity requires the API's online flag plus a nonfuture observation no older than 35 seconds. A subdevice also requires its gateway to be fresh. State, firmware, and updating are independent last-known observations.
-  - Sequential snapshot polling runs every five seconds after completion, with abort cleanup, 15-second bounded HTTP requests, sanitized errors and explicit recovery. Poll failure preserves last-known data but locks new deployment.
-  - Upload checks strict numeric semver, safe `.bin` filenames, 8-byte–20-KiB size, vector entries and embedded version. Server validation is authoritative. Upload never approves or deploys automatically. An uncertain upload can reserve a version; the UI warns against blind retries.
-  - Deployment requires the sole subdevice, a selected approved release, fresh gateway/subdevice, reported current firmware, no update/active job, and explicit confirmation. Preconditions are rechecked when confirmation is clicked.
-  - A UUID is persisted in sessionStorage **before** a deployment POST. Uncertain responses preserve the exact target/release/request tuple, including across reloads. Retrying is explicit, confirmation-gated, and uses the same UUID. No automatic POST retry or ambiguous republish is attempted. History reconciles pending requests. Corrupt/unavailable persistence fails closed.
-  - A `dispatch_unknown` job stays blocking even if its visible status is `error`; it requires investigation. Progress represents reported stages, not elapsed time. Flash and application verification are displayed separately and never inferred from dispatch.
-  - Onboarding and Telemetry are intentionally visible and disabled, including on mobile.
-
-  ## Tests and verification limits
-
-  Vitest + Testing Library run entirely offline: fetch rejects by default and API tests replace it with local responses. Tests cover observation age and state separation, disabled tabs, firmware constraints, demo isolation, access-token headers, session storage, request identity across uncertain retries/reloads, confirmation gates, polling cleanup and error recovery.
-
-  Build/lint/tests do not establish real Cognito/API integration, visual browser validation, or device installation success. Those require separate validation with actual runtime configuration. This frontend implementation makes no cloud or hardware calls.
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+These are recorded results, not tests rerun for this documentation update. No new
+upload was tested at the HTTPS origin (earlier UI upload/approval was verified;
+release checks were repeated). No actual firmware deployment or 0.4.0 hardware
+installation/button test occurred; those require separate explicit approval.

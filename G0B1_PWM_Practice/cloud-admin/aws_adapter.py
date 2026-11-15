@@ -79,7 +79,9 @@ def application():
                   connect_timeout=3, read_timeout=5)
     region = os.environ["AWS_REGION"]
     return Admin(DynamoStore(boto3.client("dynamodb"), os.environ["TABLE_NAME"]),
-                 boto3.client("s3", config=Config(signature_version="s3v4")), boto3.client("kms"),
+                 boto3.client("s3", region_name=region, endpoint_url=f"https://s3.{region}.amazonaws.com",
+                              config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"})),
+                 boto3.client("kms"),
                  boto3.client("iot-data", endpoint_url="https://" + os.environ["IOT_DATA_ENDPOINT"], config=once),
                  os.environ["FIRMWARE_BUCKET"], region, os.environ["SIGNING_KEY_ARN"],
                  os.environ["COGNITO_ISSUER"], os.environ["COGNITO_CLIENT_ID"])

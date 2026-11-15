@@ -736,6 +736,23 @@ class ConfigTests(unittest.TestCase):
         self.addCleanup(jobs.close)
         self.assertEqual(fake.Installer.call_args.kwargs["port"], str(target))
 
+    def test_install_disabled_rejects_before_worker_or_journal_write(self):
+        self.config["install_enabled"] = False
+        self.path.write_text(json.dumps(self.config))
+        fake = Mock()
+        with patch.dict(sys.modules, {"ota_installer": fake}):
+            jobs = ota.from_config(self.path, "pi-lab-01")
+        self.addCleanup(jobs.close)
+        self.assertFalse(jobs.install_enabled)
+        response = jobs.submit(dict(command_id="disabled-test", command="install_firmware",
+            version="0.3.0", from_version="0.2.0", sha256="a" * 64,
+            expires_at=int(jobs.clock()) + 60))
+        self.assertEqual(response["error"], "deployment_disabled")
+        self.assertIsNone(response["event_seq"])
+        self.assertIsNone(jobs._worker)
+        self.assertEqual(list(jobs.state_root.glob("*.json")), [])
+        fake.Installer.return_value.assert_not_called()
+
     def test_download_mapping_optional(self):
         self.config.pop("download_releases")
         self.path.write_text(json.dumps(self.config))
@@ -747,6 +764,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_strict_config_sanitizes_unknown_missing_invalid_and_duplicate_keys(self):
         cases = [[], {}, dict(self.config, arbitrary=SECRET), dict(self.config, port=2),
+                 dict(self.config, install_enabled="false"), dict(self.config, install_enabled=0),
                  dict(self.config, baseline=""), dict(self.config, run_root=None),
                  dict(self.config, catalog="\x00"), dict(self.config, download_releases=[]),
                  dict(self.config, download_releases={"0.4.0": "metadata"}),

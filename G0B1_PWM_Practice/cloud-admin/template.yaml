@@ -1,0 +1,495 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Backend-only lab admin MVP. Firmware command publishing is disabled by default.
+  Reuses the existing firmware bucket and IoT data endpoint.
+
+Parameters:
+  ArtifactBucket:
+    Type: String
+    Description: Existing private S3 bucket in this region containing the Lambda zip.
+    MinLength: 3
+  ArtifactKey:
+    Type: String
+    Description: Immutable S3 object key for a zip with backend.py and aws_adapter.py at its root.
+    MinLength: 1
+  FirmwareBucket:
+    Type: String
+    Default: iot-lab-firmware-844274146091
+    AllowedValues: [iot-lab-firmware-844274146091]
+    Description: Existing private, versioning-enabled firmware bucket; not managed by this stack.
+  IotDataEndpoint:
+    Type: String
+    Default: an0l72m95csqi-ats.iot.ap-southeast-2.amazonaws.com
+    AllowedValues: [an0l72m95csqi-ats.iot.ap-southeast-2.amazonaws.com]
+  FirmwareDeploymentEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['false', 'true']
+    Description: Enable HTTP firmware command publishing only for supervised installation.
+  WebOrigin:
+    Type: String
+    Default: http://localhost:5173
+    AllowedPattern: '^(http://localhost:5173|https://[A-Za-z0-9.-]+(:[0-9]+)?)$'
+    Description: Exact browser origin, without a path or trailing slash. No wildcard CORS.
+  CallbackUrl:
+    Type: String
+    Default: http://localhost:5173/
+    AllowedPattern: '^(http://localhost:5173/|https://)[^# ]*$'
+    Description: Exact OIDC redirect URI; must match the browser client configuration.
+  LogoutUrl:
+    Type: String
+    Default: http://localhost:5173/
+    AllowedPattern: '^(http://localhost:5173/|https://)[^# ]*$'
+    Description: Exact permitted post-logout URI.
+
+Conditions:
+  FirmwareDeploymentAllowed:
+    Fn::Equals:
+      - Ref: FirmwareDeploymentEnabled
+      - 'true'
+
+Resources:
+  AdminTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  SigningKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Admin MVP immutable firmware release signing key
+      KeySpec: RSA_2048
+      KeyUsage: SIGN_VERIFY
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          # Delegate to account IAM, without referencing the Lambda role (no cycle).
+          - Sid: EnableAccountIAM
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      UsernameConfiguration:
+        CaseSensitive: false
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 14
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 1
+
+  AdminsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admins
+      Description: Authorized admin API users; membership is checked by the backend.
+      UserPoolId:
+        Ref: UserPool
+
+  AdminResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      UserPoolId:
+        Ref: UserPool
+      Identifier: admin-api
+      Name: Admin API
+      Scopes:
+        - ScopeName: access
+          ScopeDescription: Access the admin API as a member of admins
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: AdminResourceServer
+    Properties:
+      UserPoolId:
+        Ref: UserPool
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, profile, admin-api/access]
+      SupportedIdentityProviders: [COGNITO]
+      CallbackURLs:
+        - Ref: CallbackUrl
+      LogoutURLs:
+        - Ref: LogoutUrl
+      # No password auth grant: browsers must use authorization code + S256 PKCE.
+      ExplicitAuthFlows: [ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      AccessTokenValidity: 15
+      IdTokenValidity: 15
+      RefreshTokenValidity: 1
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId:
+        Ref: UserPool
+      Domain:
+        Fn::Sub: admin-api-${AWS::AccountId}-${AWS::Region}
+
+  HttpLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: /aws/lambda/${AWS::StackName}/admin-http
+      RetentionInDays: 14
+
+  IngestLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: /aws/lambda/${AWS::StackName}/admin-ingest
+      RetentionInDays: 14
+
+  HttpRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: HttpBackend
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TableOperations
+                Effect: Allow
+                # TransactWriteItems is authorized via these underlying actions.
+                Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:PutItem, dynamodb:DeleteItem, dynamodb:ConditionCheckItem]
+                Resource:
+                  Fn::GetAtt: [AdminTable, Arn]
+              - Sid: VersionedFirmwareObjectsOnly
+                Effect: Allow
+                Action: [s3:GetObjectVersion, s3:PutObject]
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:s3:::${FirmwareBucket}/firmware/stm32g0b1/*
+              - Sid: SignReleasesOnly
+                Effect: Allow
+                Action: kms:Sign
+                Resource:
+                  Fn::GetAtt: [SigningKey, Arn]
+                Condition:
+                  StringEquals:
+                    kms:SigningAlgorithm: RSASSA_PKCS1_V1_5_SHA_256
+              - Sid: WriteOwnLogs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource:
+                  Fn::GetAtt: [HttpLogGroup, Arn]
+              - Fn::If:
+                  - FirmwareDeploymentAllowed
+                  - Sid: PublishFirmwareCommandOnly
+                    Effect: Allow
+                    Action: iot:Publish
+                    Resource:
+                      Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/lab/pi-lab-01/commands
+                  - Ref: AWS::NoValue
+
+  IngestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: IngestBackend
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: IngestTableOperations
+                Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:DeleteItem, dynamodb:ConditionCheckItem]
+                Resource:
+                  Fn::GetAtt: [AdminTable, Arn]
+              - Sid: WriteOwnLogs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource:
+                  Fn::GetAtt: [IngestLogGroup, Arn]
+
+  HttpFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: backend.handler
+      Architectures: [arm64]
+      MemorySize: 256
+      Timeout: 29
+      Role:
+        Fn::GetAtt: [HttpRole, Arn]
+      Code:
+        S3Bucket:
+          Ref: ArtifactBucket
+        S3Key:
+          Ref: ArtifactKey
+      LoggingConfig:
+        LogGroup:
+          Ref: HttpLogGroup
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Ref: AdminTable
+          FIRMWARE_BUCKET:
+            Ref: FirmwareBucket
+          IOT_DATA_ENDPOINT:
+            Ref: IotDataEndpoint
+          SIGNING_KEY_ARN:
+            Fn::GetAtt: [SigningKey, Arn]
+          COGNITO_ISSUER:
+            Fn::Sub: https://cognito-idp.${AWS::Region}.${AWS::URLSuffix}/${UserPool}
+          COGNITO_CLIENT_ID:
+            Ref: UserPoolClient
+
+          FIRMWARE_DEPLOYMENT_ENABLED:
+            Ref: FirmwareDeploymentEnabled
+
+  IngestFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: backend.handler
+      Architectures: [arm64]
+      MemorySize: 256
+      Timeout: 20
+      Role:
+        Fn::GetAtt: [IngestRole, Arn]
+      Code:
+        S3Bucket:
+          Ref: ArtifactBucket
+        S3Key:
+          Ref: ArtifactKey
+      LoggingConfig:
+        LogGroup:
+          Ref: IngestLogGroup
+      Environment:
+        # The shared adapter initializes all clients; this role still has no S3/KMS/IoT rights.
+        Variables:
+          TABLE_NAME:
+            Ref: AdminTable
+          FIRMWARE_BUCKET:
+            Ref: FirmwareBucket
+          IOT_DATA_ENDPOINT:
+            Ref: IotDataEndpoint
+          SIGNING_KEY_ARN:
+            Fn::GetAtt: [SigningKey, Arn]
+          COGNITO_ISSUER:
+            Fn::Sub: https://cognito-idp.${AWS::Region}.${AWS::URLSuffix}/${UserPool}
+          COGNITO_CLIENT_ID:
+            Ref: UserPoolClient
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-http
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - Ref: WebOrigin
+        AllowMethods: [GET, POST, OPTIONS]
+        AllowHeaders: [authorization, content-type]
+        MaxAge: 600
+
+  JwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId:
+        Ref: HttpApi
+      AuthorizerType: JWT
+      Name: CognitoAccessToken
+      IdentitySource: ['$request.header.Authorization']
+      JwtConfiguration:
+        Audience:
+          - Ref: UserPoolClient
+        Issuer:
+          Fn::Sub: https://cognito-idp.${AWS::Region}.${AWS::URLSuffix}/${UserPool}
+
+  HttpIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId:
+        Ref: HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri:
+        Fn::GetAtt: [HttpFunction, Arn]
+      PayloadFormatVersion: '2.0'
+      TimeoutInMillis: 29000
+
+  ApiProxyRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Ref: HttpApi
+      RouteKey: ANY /api/{proxy+}
+      Target:
+        Fn::Sub: integrations/${HttpIntegration}
+      AuthorizationType: JWT
+      AuthorizerId:
+        Ref: JwtAuthorizer
+      AuthorizationScopes: [admin-api/access]
+
+  ApiPreflightRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Ref: HttpApi
+      RouteKey: OPTIONS /api/{proxy+}
+      AuthorizationType: NONE
+      # A target is required for this route to become active. Gateway handles CORS.
+      Target:
+        Fn::Sub: integrations/${HttpIntegration}
+
+  HttpStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId:
+        Ref: HttpApi
+      StageName: $default
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 10
+        ThrottlingRateLimit: 5
+
+  HttpInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: HttpFunction
+      Principal: apigateway.amazonaws.com
+      SourceAccount:
+        Ref: AWS::AccountId
+      SourceArn:
+        Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/$default/*/api/*
+
+  TelemetryRule:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      TopicRulePayload:
+        AwsIotSqlVersion: '2016-03-23'
+        RuleDisabled: false
+        # Never SELECT *: payload fields cannot override the trusted ingest envelope.
+        Sql: >-
+          SELECT device_id, timestamp, boot_id, telemetry_count, subdevices,
+          'telemetry' AS ingest_type, topic() AS ingest_topic,
+          clientid() AS ingest_client_id, timestamp() AS ingest_received_at
+          FROM 'lab/pi-lab-01/telemetry'
+        Actions:
+          - Lambda:
+              FunctionArn:
+                Fn::GetAtt: [IngestFunction, Arn]
+
+  AckRule:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      TopicRulePayload:
+        AwsIotSqlVersion: '2016-03-23'
+        RuleDisabled: false
+        Sql: >-
+          SELECT device_id, command_id, event_seq, version, status, phase,
+          flash_verified, application_health_verified, error,
+          'ack' AS ingest_type, topic() AS ingest_topic,
+          clientid() AS ingest_client_id, timestamp() AS ingest_received_at
+          FROM 'lab/pi-lab-01/acks'
+        Actions:
+          - Lambda:
+              FunctionArn:
+                Fn::GetAtt: [IngestFunction, Arn]
+
+  TelemetryInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: IngestFunction
+      Principal: iot.amazonaws.com
+      SourceAccount:
+        Ref: AWS::AccountId
+      SourceArn:
+        Fn::GetAtt: [TelemetryRule, Arn]
+
+  AckInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: IngestFunction
+      Principal: iot.amazonaws.com
+      SourceAccount:
+        Ref: AWS::AccountId
+      SourceArn:
+        Fn::GetAtt: [AckRule, Arn]
+
+Outputs:
+  ApiUrl:
+    Description: API base URL; append /api/devices, /api/releases, or /api/deployments.
+    Value:
+      Fn::GetAtt: [HttpApi, ApiEndpoint]
+  CognitoIssuer:
+    Value:
+      Fn::Sub: https://cognito-idp.${AWS::Region}.${AWS::URLSuffix}/${UserPool}
+  ClientId:
+    Value:
+      Ref: UserPoolClient
+  CognitoDomain:
+    Value:
+      Fn::Sub: https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com
+  SigningKeyArn:
+    Value:
+      Fn::GetAtt: [SigningKey, Arn]
+  TableName:
+    Value:
+      Ref: AdminTable
+  HttpFunctionName:
+    Value:
+      Ref: HttpFunction
+  IngestFunctionName:
+    Value:
+      Ref: IngestFunction
+  UserPoolId:
+    Description: Pool used for the separate operator-only admin provisioning step.
+    Value:
+      Ref: UserPool

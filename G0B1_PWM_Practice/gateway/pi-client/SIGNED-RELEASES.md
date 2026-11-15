@@ -1,7 +1,10 @@
 # Signed releases and UART telemetry (gateway only)
 
 Implements the gateway portion of [the admin contract](../../docs/ADMIN-MVP-CONTRACT.md).
-This is an offline-tested candidate, **not a deployment or hardware result**.
+The original implementation was an offline-tested candidate. A telemetry-only Pi
+deployment is now verified; see [deployment evidence](../../docs/ADMIN-BACKEND-DEPLOYMENT.md).
+Firmware installation remains disabled locally and in the cloud; no signed OTA or
+0.4.0 physical/button result is claimed.
 Keep the existing `pi-iot-ota.service`, its identity/certificates, staging approval,
 local release catalog/images, original baseline, run backups and OTA journal.
 Do not start another client with the same MQTT client ID or another UART console.
@@ -10,12 +13,16 @@ Do not start another client with the same MQTT client ID or another UART console
 
 [ota-config.signed.example.json](ota-config.signed.example.json) is a separate,
 deliberately non-runnable example until its signer ARN is provisioned. Do not
-overwrite a live configuration with it. Merge the two new optional fields into
+overwrite a live configuration with it. Merge the optional fields below into
 the existing OTA configuration, preserving all existing paths and download approvals:
 
 - `uart_monitor`: boolean `true` (absent defaults to `false`). Enables this
   process's receive-only 115200 8N1 PL011 monitor. `/dev/serial0` must resolve to
   `/dev/ttyAMA0`; mini-UART is refused. Stop any separate UART monitor first.
+- `install_enabled`: boolean (absent defaults to `true` for existing installations).
+  Set `false` during telemetry-only commissioning. New install requests are rejected
+  with `deployment_disabled` before journal writes or worker creation. Existing
+  duplicate job results remain available; this is not cancellation of active work.
 - `signed_releases`: object containing **exactly**:
   - `public_key`: local RSA-2048 public PEM path, proposed `release-signing-public.pem`.
     Provision through a trusted channel; no private signing key belongs on the Pi.
