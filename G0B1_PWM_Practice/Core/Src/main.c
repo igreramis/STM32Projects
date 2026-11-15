@@ -31,6 +31,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#ifndef APP_VERSION
+#define APP_VERSION "0.1.0"
+#endif
 
 /* USER CODE END PD */
 
@@ -46,6 +49,7 @@ TIM_HandleTypeDef htim15;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+static UART_HandleTypeDef heartbeat_uart;
 
 /* USER CODE END PV */
 
@@ -61,6 +65,40 @@ static void MX_TIM2_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/* Independent of CubeMX-generated USART2: mirror heartbeat to Pi on PA9.
+ * Application is 115200 8N1; factory ROM still uses 115200 8E1.
+ * TX-only: PA10 remains available as an input for ROM after reset.
+ */
+static void Heartbeat_UART_Init(void)
+{
+  RCC_PeriphCLKInitTypeDef clock = {0};
+  GPIO_InitTypeDef gpio = {0};
+  clock.PeriphClockSelection = RCC_PERIPHCLK_USART1;
+  clock.Usart1ClockSelection = RCC_USART1CLKSOURCE_PCLK1;
+  if (HAL_RCCEx_PeriphCLKConfig(&clock) != HAL_OK) Error_Handler();
+  __HAL_RCC_USART1_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  gpio.Pin = GPIO_PIN_9;
+  gpio.Mode = GPIO_MODE_AF_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+  gpio.Alternate = GPIO_AF1_USART1;
+  HAL_GPIO_Init(GPIOA, &gpio);
+  heartbeat_uart.Instance = USART1;
+  heartbeat_uart.Init.BaudRate = 115200;
+  heartbeat_uart.Init.WordLength = UART_WORDLENGTH_8B;
+  heartbeat_uart.Init.StopBits = UART_STOPBITS_1;
+  heartbeat_uart.Init.Parity = UART_PARITY_NONE;
+  heartbeat_uart.Init.Mode = UART_MODE_TX;
+  heartbeat_uart.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  heartbeat_uart.Init.OverSampling = UART_OVERSAMPLING_16;
+  heartbeat_uart.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  heartbeat_uart.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  heartbeat_uart.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&heartbeat_uart) != HAL_OK) Error_Handler();
+  if (HAL_UARTEx_DisableFifoMode(&heartbeat_uart) != HAL_OK) Error_Handler();
+}
+
 volatile uint8_t btn_dwn_press = 0, btn_up_press = 0, btn_press = 0;
 volatile uint32_t t_btn_dwn_press = 0, t_btn_up_press = 0, t_btn_press = 0;
 /**
@@ -272,10 +310,11 @@ int main(void)
   MX_USART2_UART_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+  Heartbeat_UART_Init();
   HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
   uint32_t last_serial_tick = HAL_GetTick();
-  static const uint8_t serial_message[] = "Hello from NUCLEO-G0B1RE!\r\n";
+  static const uint8_t serial_message[] = "Hello from NUCLEO-G0B1RE! firmware=" APP_VERSION "\r\n";
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -294,6 +333,7 @@ int main(void)
     {
       last_serial_tick = now;
       HAL_UART_Transmit(&huart2, serial_message, sizeof(serial_message) - 1U, 100U);
+      HAL_UART_Transmit(&heartbeat_uart, serial_message, sizeof(serial_message) - 1U, 100U);
     }
 
     determine_btn_press_time();

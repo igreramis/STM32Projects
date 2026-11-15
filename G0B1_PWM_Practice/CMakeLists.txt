@@ -66,3 +66,22 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
     # Add user defined libraries
 )
+
+# Local lab variants: identical code/build flags, only heartbeat version differs.
+# Outputs stay in the build tree; publishing releases is a separate action.
+get_target_property(APP_SOURCES ${CMAKE_PROJECT_NAME} SOURCES)
+foreach(VERSION IN ITEMS 0.1.0 0.2.0 0.3.0)
+    string(REPLACE "." "_" VERSION_TARGET "${VERSION}")
+    set(TARGET "firmware_${VERSION_TARGET}")
+    add_executable(${TARGET} ${APP_SOURCES})
+    target_link_libraries(${TARGET} PRIVATE stm32cubemx STM32_Drivers ${TOOLCHAIN_LINK_LIBRARIES})
+    target_compile_definitions(${TARGET} PRIVATE APP_VERSION="${VERSION}")
+    set_target_properties(${TARGET} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/versions/${VERSION}"
+        OUTPUT_NAME firmware)
+    target_link_options(${TARGET} PRIVATE "-Wl,-Map=${CMAKE_BINARY_DIR}/versions/${VERSION}/firmware.map")
+    add_custom_command(TARGET ${TARGET} POST_BUILD
+        COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${TARGET}>
+            "${CMAKE_BINARY_DIR}/versions/${VERSION}/firmware.bin"
+        VERBATIM)
+endforeach()

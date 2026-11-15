@@ -1,0 +1,22 @@
+[Unit]
+Description=Pi IoT gateway with supervised hardware OTA
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/aws-iot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/aws-iot/.venv/bin/python -u /home/pi/aws-iot/client.py --config /home/pi/aws-iot/config.json --ota-config /home/pi/aws-iot/ota-config.json
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+# Never SIGKILL an installer in the middle of a bounded flash operation.
+TimeoutStopSec=infinity
+# Restarting never resumes a journaled installation; it reports interrupted.
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

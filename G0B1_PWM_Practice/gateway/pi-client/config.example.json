@@ -1,0 +1,9 @@
+{
+  "endpoint": "REPLACE_WITH_IOT_ENDPOINT.example.invalid",
+  "port": 8883,
+  "client_id": "pi-lab-01",
+  "certificate": "~/aws-iot/certs/device-certificate.pem.crt",
+  "private_key": "~/aws-iot/certs/private.pem.key",
+  "root_ca": "~/aws-iot/certs/AmazonRootCA1.pem",
+  "telemetry_interval_seconds": 10
+}

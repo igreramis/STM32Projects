@@ -1,3 +1,33 @@
 build
 mx.scratch
 !.settings
+
+# Python environments and generated files
+.venv*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local credentials, signed commands, and deployment configuration
+certs/
+*.key
+*.pem
+*.crt
+*.presigned-url
+wo.txt
+config.json
+ota-config.json
+release.json
+!gateway/pi-client/release.json
+stage-command.json
+.env
+.env.*
+
+# Device artifacts, backups and durable runtime state
+staged/
+local-releases/
+local-releases.json
+local-baseline.bin
+rom-program-runs/
+ota-runs/
+ota-state/

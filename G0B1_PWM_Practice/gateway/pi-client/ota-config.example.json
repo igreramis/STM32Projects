@@ -1,0 +1,9 @@
+{
+  "catalog": "local-releases.json",
+  "release_root": "local-releases",
+  "baseline": "local-baseline.bin",
+  "run_root": "ota-runs",
+  "state_root": "ota-state",
+  "port": "/dev/serial0",
+  "download_releases": {}
+}

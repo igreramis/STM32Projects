@@ -1,0 +1,2 @@
+# Optional standalone ROM probe; does not change cloud-client dependencies.
+pyserial==3.5

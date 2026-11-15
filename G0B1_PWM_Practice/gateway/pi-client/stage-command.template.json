@@ -1,0 +1,6 @@
+{
+  "command_id": "stage-unique-id",
+  "command": "stage_firmware",
+  "version": "0.1.0",
+  "url": "PASTE_VERSION_SPECIFIC_PRESIGNED_HTTPS_URL_HERE"
+}

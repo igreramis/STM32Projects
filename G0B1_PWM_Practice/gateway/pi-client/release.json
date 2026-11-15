@@ -1,0 +1,10 @@
+{
+  "target": "NUCLEO-G0B1RE",
+  "version": "0.1.0",
+  "size_bytes": 19212,
+  "sha256": "e2c6d4bcf172cc803fa497a60bd0b625f5448a33433ab2d00bacec5fff6cc521",
+  "bucket": "iot-lab-firmware-844274146091",
+  "region": "ap-southeast-2",
+  "key": "firmware/stm32g0b1/0.1.0/firmware.bin",
+  "version_id": "vtuJfI9yuJtFx6EqWSkSpULFENCCgo54"
+}
