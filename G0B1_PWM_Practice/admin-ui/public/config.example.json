@@ -1,0 +1,7 @@
+{
+  "apiBaseUrl": "https://api.example.com",
+  "cognitoDomain": "https://your-domain.auth.ap-southeast-2.amazoncognito.com",
+  "userPoolClientId": "replacewithclientid",
+  "redirectUri": "http://localhost:5173/",
+  "region": "ap-southeast-2"
+}

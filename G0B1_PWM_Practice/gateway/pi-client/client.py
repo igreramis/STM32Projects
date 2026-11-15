@@ -14,6 +14,7 @@ import re
 import signal
 import threading
 import time
+import uuid
 
 from awscrt import mqtt
 from awsiot import mqtt_connection_builder
@@ -22,7 +23,7 @@ from firmware import FirmwareStager, Release, StageError
 
 
 LOG = logging.getLogger("pi-iot")
-MAX_COMMAND_BYTES = 4096
+MAX_COMMAND_BYTES = 8192
 MAX_COMMAND_AGE = 60
 OPERATION_TIMEOUT = 20
 
@@ -73,7 +74,8 @@ def parse_command_object(payload):
     if len(payload) > MAX_COMMAND_BYTES:
         raise ValueError("Command exceeds size limit")
     try:
-        value = json.loads(payload.decode("utf-8"), parse_constant=reject_nonfinite)
+        from signed_release import unique
+        value = json.loads(payload.decode("utf-8"), parse_constant=reject_nonfinite, object_pairs_hook=unique)
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise ValueError("Invalid JSON command") from exc
     if not isinstance(value, dict):
@@ -162,6 +164,8 @@ class Gateway:
         self.config = config
         self.ota = ota
         self.stop = threading.Event()
+        self.boot_id = uuid.uuid4().hex
+        self.monitor = getattr(ota, "monitor", None)
         self.connected = threading.Event()
         self.ready = threading.Event()
         self.failed = threading.Event()
@@ -248,8 +252,23 @@ class Gateway:
         # this run rather than accumulating SDK offline publish operations.
         future.result(timeout=OPERATION_TIMEOUT)
 
+    def telemetry(self, count):
+        data = snapshot(self.config.client_id, count)
+        data["boot_id"] = self.boot_id
+        if self.monitor is not None:
+            subdevice = self.monitor.snapshot()
+        else:
+            subdevice = dict(device_id="stm32g0b1-01", firmware=None, state=None,
+                             sequence=None, last_seen=None, age_seconds=None, updating=False)
+        if self.ota is not None:
+            subdevice["updating"] = subdevice["updating"] or self.ota.status().get("active", False)
+        data["subdevices"] = [subdevice]
+        return data
+
     def run(self, duration=0):
         try:
+            if self.monitor is not None:
+                self.monitor.start()
             LOG.info("Connecting to %s:%s as %s", self.config.endpoint, self.config.port, self.config.client_id)
             self.connection.connect().result(timeout=OPERATION_TIMEOUT)
             self.connected.set()
@@ -272,7 +291,7 @@ class Gateway:
                     continue
                 if time.monotonic() >= next_telemetry:
                     next_count = self.telemetry_count + 1
-                    self.publish("telemetry", snapshot(self.config.client_id, next_count))
+                    self.publish("telemetry", self.telemetry(next_count))
                     self.telemetry_count = next_count
                     LOG.info("Telemetry PUBACK received; count=%d", next_count)
                     next_telemetry = time.monotonic() + self.config.telemetry_interval_seconds
@@ -296,13 +315,17 @@ class Gateway:
                          response["command_id"], response["status"])
         finally:
             self.ready.clear()
-            if self.ota is not None:
-                # Preserve the lifetime job lock until the worker has stopped.
-                self.ota.close()
             try:
-                self.connection.disconnect().result(timeout=10)
-            except Exception as exc:
-                LOG.warning("Disconnect did not complete cleanly: %s", exc)
+                if self.ota is not None:
+                    # Coordinator closes worker AND monitor under its lifetime lock.
+                    self.ota.close()
+                elif self.monitor is not None:
+                    self.monitor.close()
+            finally:
+                try:
+                    self.connection.disconnect().result(timeout=10)
+                except Exception as exc:
+                    LOG.warning("Disconnect did not complete cleanly: %s", exc)
 
     def run_ota_loop(self, duration=0):
         """One outstanding MQTT publish; journal revisions survive disconnects.
@@ -386,7 +409,7 @@ class Gateway:
                 elif not replies.empty():
                     suffix, data = "acks", replies.get_nowait()
                 elif now >= next_telemetry:
-                    suffix, data = "telemetry", snapshot(self.config.client_id, self.telemetry_count + 1)
+                    suffix, data = "telemetry", self.telemetry(self.telemetry_count + 1)
                     next_telemetry = now + self.config.telemetry_interval_seconds
                 if data is not None:
                     try:

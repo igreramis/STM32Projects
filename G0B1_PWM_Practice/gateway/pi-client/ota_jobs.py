@@ -22,6 +22,7 @@ import re
 import tempfile
 import threading
 import time
+import signed_release
 
 
 VERSIONS = ("0.1.0", "0.2.0", "0.3.0")
@@ -157,7 +158,7 @@ class OtaJobs:
                     record.get("device_id") != self.client_id or
                     type(record.get("fingerprint")) is not str or
                     re.fullmatch(r"[0-9a-f]{64}", record["fingerprint"]) is None or
-                    record.get("version") not in VERSIONS or
+                    not signed_release.version(record.get("version")) or
                     record.get("phase") not in _PHASES or
                     record.get("status") not in _PHASES | _TERMINAL | {"running"} or
                     any(type(record.get(key)) is not bool for key in _FLAGS) or
@@ -222,27 +223,33 @@ class OtaJobs:
         if type(value) is not dict:
             raise ValueError
         command = dict(value)
-        if (set(command) not in (_REQUIRED, _REQUIRED | {"url"}) or
+        dynamic = "release" in command
+        if (set(command) not in (_REQUIRED, _REQUIRED | {"url"}, _REQUIRED | {"url", "release"}) or
                 _safe_id(command.get("command_id")) is None or
                 command.get("command") != "install_firmware" or
-                command.get("version") not in VERSIONS or
-                command.get("from_version") not in ("original",) + VERSIONS or
+                    not (signed_release.version(command.get("version")) if dynamic else command.get("version") in VERSIONS) or
+                    not (command.get("from_version") == "original" or
+                       (signed_release.version(command.get("from_version")) if dynamic else
+                        command.get("from_version") in VERSIONS)) or
                 type(command.get("sha256")) is not str or
                 _HASH.fullmatch(command["sha256"]) is None or
                 type(command.get("expires_at")) is not int or
                 ("url" in command and (type(command["url"]) is not str or
                                        len(command["url"]) > 3500))):
             raise ValueError
-        fingerprint = hashlib.sha256(json.dumps(
+        serialized = json.dumps(
             command, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-            allow_nan=False).encode("ascii")).hexdigest()
-        return command, fingerprint
+            allow_nan=False).encode("ascii")
+        if len(serialized) > 8192:
+            raise ValueError
+        fingerprint = hashlib.sha256(serialized).hexdigest()
+        return json.loads(serialized), fingerprint
 
     def submit(self, value):
         command_id = value.get("command_id") if type(value) is dict else None
         try:
             command, fingerprint = self._command(value)
-        except (ValueError, TypeError, OverflowError):
+        except (ValueError, TypeError, OverflowError, RecursionError):
             return self._reject(command_id, "invalid_arguments")
         command_id = command["command_id"]
         with self._lock:
@@ -399,6 +406,11 @@ class OtaJobs:
             worker.join()  # No lock held: progress/final persistence needs it.
         with self._lock:
             if self._root_fd is not None:
+                monitor = getattr(self, "monitor", None)
+                if monitor is not None:
+                    # The process lock must also cover the receive-only owner.
+                    # Failed close retains the lock until process exit/recovery.
+                    monitor.close()
                 os.close(self._root_fd)
                 self._root_fd = None
 
@@ -409,6 +421,17 @@ class OtaJobs:
         Resource contents and serial availability are checked by Installer only
         in its worker. Relative paths (including download metadata) resolve
         against the config directory, never the process working directory.
+
+        Optional ``signed_releases`` has exactly public_key (local PEM path),
+        key_id (exact KMS ARN), bucket, region, seed_version. Seed must be an
+        existing catalog version or 'original', explicitly known by the operator.
+        The full backup must still match that pin before erase. Predecessor
+        state lives in state_root/verified-flash; never delete it to recover an
+        interrupted job. Operator investigation is required for pending state.
+        Optional ``uart_monitor: true`` enables the receive-only monitor inside
+        this same client/service process; default is disabled. Stop external
+        UART monitors before enabling. No service or live config is rewritten.
+        Signed operation requires the optional cryptography dependency locally.
         """
         if path is None:
             return None
@@ -417,7 +440,8 @@ class OtaJobs:
             config = json.loads(config_path.read_text(encoding="utf-8"),
                                 object_pairs_hook=_unique_object)
             required = {"catalog", "release_root", "baseline", "run_root", "state_root", "port"}
-            if type(config) is not dict or set(config) not in (required, required | {"download_releases"}):
+            optional = {"download_releases", "signed_releases", "uart_monitor"}
+            if type(config) is not dict or not required <= set(config) or set(config) - required - optional:
                 raise ValueError
 
             def resolve(value):
@@ -431,11 +455,31 @@ class OtaJobs:
             if type(downloads) is not dict or any(key not in VERSIONS for key in downloads):
                 raise ValueError
             kwargs["download_releases"] = {key: resolve(value) for key, value in downloads.items()}
+            signing = config.get("signed_releases")
+            if "signed_releases" in config:
+                if (type(signing) is not dict or set(signing) != {"public_key", "key_id", "bucket", "region", "seed_version"} or
+                        signing["seed_version"] not in ("original",) + VERSIONS):
+                    raise ValueError
+                kwargs["verifier"] = signed_release.ReleaseVerifier(resolve(signing["public_key"]),
+                    signing["key_id"], signing["bucket"], signing["region"])
+                from verified_state import VerifiedState
+                kwargs["predecessor_state"] = VerifiedState(Path(kwargs["state_root"]) / "verified-flash", signing["seed_version"])
+            monitor_enabled = config.get("uart_monitor", False)
+            if type(monitor_enabled) is not bool:
+                raise ValueError
         except Exception:
             raise ValueError("invalid_ota_config") from None
         from ota_installer import Installer  # Explicit opt-in only; no hardware opened here.
         state_root = kwargs.pop("state_root")
-        return cls(client_id, state_root, Installer(**kwargs))
+        installer = Installer(**kwargs)
+        monitor = None
+        if monitor_enabled:
+            from uart_state import StateMonitor, MonitoredInstaller
+            monitor = StateMonitor(kwargs["port"])
+            installer = MonitoredInstaller(installer, monitor)
+        jobs = cls(client_id, state_root, installer)
+        jobs.monitor = monitor
+        return jobs
 
 
 def from_config(path, client_id):

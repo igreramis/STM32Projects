@@ -625,6 +625,31 @@ class ClientOtaTests(unittest.TestCase):
         self.assertEqual(self.jobs.pending_results()[0]["error"], "cancelled")
         self.delivered.assert_not_called()
 
+    def test_monitor_start_and_shutdown_on_connection_failure(self):
+        lifecycle = Mock()
+        monitor = Mock()
+        self.jobs.monitor = self.gateway.monitor = monitor
+        lifecycle.attach_mock(monitor.start, "monitor_start")
+        lifecycle.attach_mock(monitor.close, "monitor_close")
+        lifecycle.attach_mock(self.connection.disconnect, "disconnect")
+        self.connection.connect.return_value.fail()
+        with self.assertRaises(RuntimeError):
+            self.gateway.run()
+        self.assertEqual(lifecycle.mock_calls,
+                         [call.monitor_start(), call.monitor_close(), call.disconnect()])
+        self.assertIsNone(self.jobs._root_fd)
+
+    def test_gateway_restart_changes_boot_id_and_default_observations_are_null(self):
+        second = client.Gateway(self.config)
+        self.assertNotEqual(self.gateway.boot_id, second.boot_id)
+        before = self.gateway.telemetry(1)
+        after = self.gateway.telemetry(2)
+        self.assertEqual(before["boot_id"], after["boot_id"])
+        self.assertEqual(set(before), {"device_id", "telemetry_count", "uptime_seconds",
+                                       "boot_id", "subdevices"})
+        self.assertEqual(before["subdevices"], [dict(device_id="stm32g0b1-01", firmware=None,
+            state=None, sequence=None, last_seen=None, age_seconds=None, updating=False)])
+
     def test_run_finally_closes_ota_on_connect_subscribe_or_loop_failure(self):
         for failure in ("connect", "subscribe", "loop"):
             with self.subTest(failure=failure):

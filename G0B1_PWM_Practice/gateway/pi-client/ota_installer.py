@@ -11,7 +11,7 @@ progress callback must durably commit before returning; failure stops the worker
 only after full readback verification (even if subsequent app startup fails).
 """
 
-from contextlib import closing
+from contextlib import contextmanager
 from pathlib import Path
 import re
 import time
@@ -20,6 +20,7 @@ import firmware
 import heartbeat_monitor
 import rom_local
 import rom_program as engine
+import signed_release
 from rom_read_id import ACK, NACK, RomProbe
 
 
@@ -158,7 +159,7 @@ def _wait_for_application(port, version, clock, stop_event):
             line = bytes(pending)
             if line.endswith(b"\r"):
                 line = line[:-1]
-            if heartbeat_monitor.heartbeat_version(line) == version:
+            if heartbeat_monitor.heartbeat_version(line, allow_dynamic=True) == version:
                 matches += 1
                 print("application heartbeat: {}/2 exact matches".format(matches), flush=True)
             pending.clear()
@@ -220,26 +221,43 @@ class _ProgressRecord(engine.RunRecord):
 
 class Installer:
     def __init__(self, catalog, release_root, baseline, run_root,
-                 port='/dev/serial0', download_releases=None):
+                 port='/dev/serial0', download_releases=None, verifier=None, predecessor_state=None):
         self.catalog = Path(catalog)
         self.release_root = Path(release_root)
         self.baseline = Path(baseline)
         self.run_root = Path(run_root)
         self.port = port
         self.download_releases = dict(download_releases or {})
+        self.verifier = verifier
+        self.predecessor_state = predecessor_state
         # Injectable clocks for software tests; not remote command fields.
         self.clock = time.monotonic
         self.wall_clock = time.time
+        self.uart_released = True
+
+    @contextmanager
+    def _port(self, factory):
+        self.uart_released = False
+        port = factory()
+        try:
+            yield port
+        finally:
+            port.close()
+            self.uart_released = True
 
     @staticmethod
     def _command(command):
         required = {"command_id", "command", "version", "from_version", "sha256", "expires_at"}
-        if (type(command) is not dict or set(command) not in (required, required | {"url"}) or
+        dynamic = type(command) is dict and "release" in command
+        if (type(command) is not dict or set(command) not in (required, required | {"url"}, required | {"url", "release"}) or
                 command.get("command") != "install_firmware" or
                 not isinstance(command.get("command_id"), str) or
                 re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", command["command_id"]) is None or
-                command.get("version") not in rom_local.VERSIONS or
-                command.get("from_version") not in ("original",) + rom_local.VERSIONS or
+                 not (signed_release.version(command.get("version")) if dynamic else
+                     command.get("version") in rom_local.VERSIONS) or
+                 not (command.get("from_version") == "original" or
+                     (signed_release.version(command.get("from_version")) if dynamic else
+                      command.get("from_version") in rom_local.VERSIONS)) or
                 type(command.get("expires_at")) is not int or
                 not isinstance(command.get("sha256"), str) or
                 re.fullmatch(r"[0-9a-f]{64}", command["sha256"]) is None):
@@ -289,6 +307,7 @@ class Installer:
                       version=None, image_sha256=None, flash_sha256=None,
                       run_directory=None)
         programmer = record = None
+        previous = None
         error_code = "image_validation_failed"
 
         def notify(stage, **details):
@@ -299,6 +318,8 @@ class Installer:
             try:
                 flags = {key: value for key, value in result.items() if key != "status"}
                 progress(stage, **dict(flags, **details))
+                if stage == "erase_started" and self.predecessor_state is not None:
+                    self.predecessor_state.intent(previous)
             except Exception:
                 code = (_PHASE_ERRORS.get(programmer.phase, error_code)
                         if programmer is not None and programmer.phase not in ("verified", "failed")
@@ -310,6 +331,8 @@ class Installer:
         try:
             command = self._command(command)
             result["version"] = command["version"]
+            if not self.uart_released:
+                raise InstallerError("bootloader_sync_failed")
 
             def authorized():
                 _check_stop(stop_event)
@@ -317,20 +340,51 @@ class Installer:
                     raise InstallerError("command_expired")
 
             authorized()
+            if command["expires_at"] > self.wall_clock() + 1800:
+                raise InstallerError("command_expired")
+            dynamic = "release" in command
+            download = None
+            if dynamic:
+                if self.verifier is None or self.predecessor_state is None:
+                    raise InstallerError("download_not_approved")
+                download = self.verifier.command(command)
             releases = rom_local.validate_catalog(self.catalog, self.release_root, self.baseline)
-            target = releases[command["version"]]
+            if self.predecessor_state is not None:
+                previous = self.predecessor_state.load(releases)
+                if previous["version"] != command["from_version"]:
+                    raise InstallerError("backup_failed")
+                predecessor = previous["flash_sha256"]
+            else:
+                predecessor = (rom_local.LEGACY_BASELINE_SHA256 if command["from_version"] == "original"
+                               else releases[command["from_version"]].expected_flash_sha256)
+            if dynamic:
+                metadata = rom_local.LocalRelease(Path("."), download.size_bytes, download.sha256, "")
+                with rom_local._configured_engine(metadata, predecessor):
+                    record = _ProgressRecord(self.run_root, notify, authorized, result)
+                notify("downloading")
+                selected = self._download(download, command, record.path / "download")
+                data = rom_local._read_bounded(selected, 20480)
+                signed_release.validate_image(data, download)
+                baseline = rom_local._read_bounded(self.baseline, rom_local.FLASH_SIZE)
+                if len(baseline) != rom_local.FLASH_SIZE or engine.sha256(baseline) != rom_local.LEGACY_BASELINE_SHA256:
+                    raise InstallerError("image_validation_failed")
+                target = rom_local.LocalRelease(selected, len(data), download.sha256,
+                    engine.sha256(data + b"\xff" * (rom_local.ERASE_SIZE - len(data)) + baseline[rom_local.ERASE_SIZE:]))
+                if command["version"] in releases and target.sha256 != releases[command["version"]].sha256:
+                    raise InstallerError("image_validation_failed")
+            else:
+                target = releases[command["version"]]
+                download = self._download_metadata(command, target)
             if command["sha256"] != target.sha256:
                 raise InstallerError("image_validation_failed")
             result["image_sha256"] = target.sha256
-            predecessor = (rom_local.LEGACY_BASELINE_SHA256 if command["from_version"] == "original"
-                           else releases[command["from_version"]].expected_flash_sha256)
-            download = self._download_metadata(command, target)
 
             with rom_local._configured_engine(target, predecessor):
                 error_code = "backup_failed"
-                record = _ProgressRecord(self.run_root, notify, authorized, result)
+                if record is None:
+                    record = _ProgressRecord(self.run_root, notify, authorized, result)
                 selected = target.path
-                if download is not None:
+                if download is not None and not dynamic:
                     error_code = "download_failed"
                     authorized()
                     notify("downloading")
@@ -345,7 +399,7 @@ class Installer:
                 authorized()
                 if Path(self.port).resolve() != Path("/dev/ttyAMA0"):
                     raise InstallerError("bootloader_sync_failed")
-                with closing(engine.open_port(serial, self.port, 115200, 2.0)) as port:
+                with self._port(lambda: engine.open_port(serial, self.port, 115200, 2.0)) as port:
                     programmer = engine.Programmer(port, image, record, clock=self.clock)
                     programmer.io = WaitingRomProbe(port, self.clock, stop_event, notify)
 
@@ -361,11 +415,13 @@ class Installer:
                     if (programmed["status"] != "flash_verified" or
                             programmed["flash_sha256"] != target.expected_flash_sha256):
                         raise InstallerError("verification_failed")
+                    if self.predecessor_state is not None:
+                        self.predecessor_state.verified(command["version"], programmed["flash_sha256"])
 
             # No app port or boot guidance on any ROM/programming failure.
             error_code = "application_start_timeout"
             _check_stop(stop_event)
-            with closing(heartbeat_monitor.open_port(serial, self.port)) as port:
+            with self._port(lambda: heartbeat_monitor.open_port(serial, self.port)) as port:
                 port.reset_input_buffer()  # Must precede the operator's boot instruction.
                 notify("flash_verified")
                 print("Flash verified. Set BOOT0 LOW and press/release B2.", flush=True)

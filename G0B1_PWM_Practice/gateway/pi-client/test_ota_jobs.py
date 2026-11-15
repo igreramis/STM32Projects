@@ -717,12 +717,24 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(kwargs["release_root"], str(self.root / "missing/releases"))
         self.assertEqual(kwargs["baseline"], str(self.root / "missing/baseline.bin"))
         self.assertEqual(kwargs["run_root"], str(self.root / "runs"))
-        self.assertEqual(kwargs["port"], "/dev/serial0")
+        self.assertEqual(kwargs["port"], str(Path("/dev/serial0").resolve()))
         self.assertEqual(kwargs["download_releases"], {"0.2.0": str(self.root / "metadata/release.json")})
         self.assertEqual(jobs.state_root, self.root / "state")
         self.assertFalse((self.root / "missing").exists())
         fake.Installer.return_value.assert_not_called()
         self.assertIsNone(jobs._worker)
+
+    def test_port_symlink_resolves_to_device_path(self):
+        alias = self.root / "serial-alias"
+        target = self.root / "device"
+        alias.symlink_to(target)
+        self.config["port"] = str(alias)
+        self.path.write_text(json.dumps(self.config))
+        fake = Mock()
+        with patch.dict(sys.modules, {"ota_installer": fake}):
+            jobs = ota.from_config(self.path, "pi-lab-01")
+        self.addCleanup(jobs.close)
+        self.assertEqual(fake.Installer.call_args.kwargs["port"], str(target))
 
     def test_download_mapping_optional(self):
         self.config.pop("download_releases")

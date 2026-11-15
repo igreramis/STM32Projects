@@ -4,7 +4,8 @@ This directory is the version-controlled gateway source alongside the STM32
 firmware. It was imported from the existing external pi-client development
 directory; changes here are not automatically synchronized to that directory
 or to the Pi. Deployed copy belongs in `/home/pi/aws-iot`; dependencies are in
-its existing `.venv`. No systemd service is installed. Never put private keys
+its existing `.venv`. Preserve the existing `pi-iot-ota.service`; repository
+examples do not install or change it. Never put private keys
 into source control.
 
 ## Current OTA support and configuration
@@ -15,6 +16,12 @@ limits. Configuration and service examples are not enabled deployments.
 The staging/read-only behavior documented below describes the default mode;
 opt-in OTA adds a separate `install_firmware` command and durable job journal.
 
+For dynamic signed releases and integrated UART telemetry, see
+[SIGNED-RELEASES.md](SIGNED-RELEASES.md) and the separate
+[signed configuration example](ota-config.signed.example.json). Legacy-only
+[ota-config.example.json](ota-config.example.json) remains unchanged. The new
+features are explicit local opt-ins, not an enabled deployment.
+
 Copy `config.example.json` to local-only `config.json`, replace the placeholder
 endpoint, and provision certificates outside source control. `release.json`
 is required at gateway startup and by the staging tests: it contains the
@@ -24,13 +31,16 @@ Private configuration, keys, signed commands, environments and run backups are
 ignored. Approved release binaries/catalog/baseline must be provisioned locally
 as described in the guide; they are not included in this source snapshot.
 
-Full software regression suite (no hardware or network operations):
+Guarded software regression suite (no UART opens or network operations;
+four legacy PTY transport tests explicitly deferred):
 
 ```sh
-python -m unittest -q test_rom_program test_rom_read_id test_rom_local test_heartbeat_monitor test_client test_firmware test_ota_installer test_ota_jobs test_client_ota
+python run_tests.py
 ```
 
-Install both requirements files into the chosen environment before testing.
+Install the main, hardware and signed requirements into the chosen environment
+before testing. Ordinary `python -m unittest discover` also runs the four
+virtual-serial PTY tests; use it only when PTY serial opens are permitted.
 
 ## Run on the Pi
 
@@ -76,10 +86,13 @@ commands even to an already connected client (MQTT 3 retain delivery semantics).
 The SDK reconnects established sessions with 1–30 second backoff. Subscriptions
 are renewed after a session loss. While offline, telemetry is skipped rather
 than accumulated. The received-command queue is capped at 32 and locally queued
-messages older than 60 seconds are dropped. Message payloads are capped at 4 KiB.
+messages older than 60 seconds are dropped. Message payloads are capped at 8 KiB.
 Only one publish is outstanding; a publish timeout exits with an error instead
 of building an offline backlog. Initial connection/subscription errors also
-exit. No automatic process restart or durable offline storage is implemented.
+exit. Default read-only/staging mode has no durable result store. Opt-in OTA
+uses a durable job journal and a nonblocking one-outstanding-publish loop;
+pending results survive disconnects and process restart without reinstalling.
+Service restart policy is separate from command retry.
 QoS 1 may duplicate delivery; IDs make the read-only command replay-safe within
 the bounded cache. The cache and telemetry counter reset on restart.
 

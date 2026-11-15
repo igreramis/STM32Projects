@@ -6,7 +6,9 @@ Implemented locally and now included in version control under
 [gateway/pi-client](../gateway/pi-client/README.md). This snapshot was imported
 from /home/wh/Downloads/resumes/plasmaleap/aws/pi-client; future tracked changes
 belong in the repository copy. The two directories do not automatically sync.
-**Not deployed, enabled, or tested against live MQTT/hardware yet.**
+**Deployed to Pi; service activation and live MQTT/hardware trial pending.**
+See [deployment/trial log](CLOUD-INSTALL-TRIAL.md). The Pi suite now has 310 tests
+after correcting a test-only serial-symlink assumption; all 310 pass.
 309 software tests passed from the repository copy on host Python 3.8.10,
 including simulated ROM,
 heartbeat, journal/restart, and MQTT future/failure tests. Simulation does not

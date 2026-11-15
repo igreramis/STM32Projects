@@ -67,15 +67,19 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     # Add user defined libraries
 )
 
-# Local lab variants: identical code/build flags, only heartbeat version differs.
+# Legacy variants retain their original behavior; only 0.4.0 enables states.
+# Never overwrite published 0.1/0.2/0.3 artifacts: approval uses immutable hashes.
 # Outputs stay in the build tree; publishing releases is a separate action.
 get_target_property(APP_SOURCES ${CMAKE_PROJECT_NAME} SOURCES)
-foreach(VERSION IN ITEMS 0.1.0 0.2.0 0.3.0)
+foreach(VERSION IN ITEMS 0.1.0 0.2.0 0.3.0 0.4.0)
     string(REPLACE "." "_" VERSION_TARGET "${VERSION}")
     set(TARGET "firmware_${VERSION_TARGET}")
     add_executable(${TARGET} ${APP_SOURCES})
     target_link_libraries(${TARGET} PRIVATE stm32cubemx STM32_Drivers ${TOOLCHAIN_LINK_LIBRARIES})
     target_compile_definitions(${TARGET} PRIVATE APP_VERSION="${VERSION}")
+    if(VERSION VERSION_EQUAL "0.4.0")
+        target_compile_definitions(${TARGET} PRIVATE APP_STATE_TELEMETRY=1)
+    endif()
     set_target_properties(${TARGET} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/versions/${VERSION}"
         OUTPUT_NAME firmware)

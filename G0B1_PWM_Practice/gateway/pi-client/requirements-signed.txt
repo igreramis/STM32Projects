@@ -1,0 +1,3 @@
+# Optional dynamic signed-release verification, in addition to existing dependencies.
+# pip selects a release compatible with the selected interpreter (including Python 3.8).
+cryptography>=43

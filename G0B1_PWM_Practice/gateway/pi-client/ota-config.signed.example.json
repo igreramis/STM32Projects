@@ -1,0 +1,17 @@
+{
+  "catalog": "local-releases.json",
+  "release_root": "local-releases",
+  "baseline": "local-baseline.bin",
+  "run_root": "ota-runs",
+  "state_root": "ota-state",
+  "port": "/dev/serial0",
+  "download_releases": {},
+  "uart_monitor": true,
+  "signed_releases": {
+    "public_key": "release-signing-public.pem",
+    "key_id": "REPLACE_WITH_EXACT_KMS_KEY_ARN",
+    "bucket": "iot-lab-firmware-844274146091",
+    "region": "ap-southeast-2",
+    "seed_version": "0.3.0"
+  }
+}

@@ -13,6 +13,7 @@ from pathlib import Path
 import sys
 import termios
 import time
+from signed_release import version as valid_version
 
 
 VERSIONS = ("0.1.0", "0.2.0", "0.3.0")
@@ -58,16 +59,20 @@ def open_port(serial_module, device):
         raise
 
 
-def heartbeat_version(line):
-    for version in VERSIONS:
-        if line == PREFIX + version.encode("ascii"):
+def heartbeat_version(line, allow_dynamic=False):
+    if line.startswith(PREFIX):
+        try:
+            version = line[len(PREFIX):].decode("ascii")
+        except UnicodeError:
+            return None
+        if valid_version(version) and (allow_dynamic or version in VERSIONS):
             return version
     return None
 
 
 def monitor(port, version=None, count=None, timeout=None, clock=time.monotonic):
     """Read at most 512 bytes per line and enforce one overall monotonic deadline."""
-    if version is not None and version not in VERSIONS:
+    if version is not None and not valid_version(version):
         raise ValueError("unknown expected version")
     if count is not None and (type(count) is not int or count <= 0):
         raise ValueError("count must be a positive integer")
@@ -95,7 +100,7 @@ def monitor(port, version=None, count=None, timeout=None, clock=time.monotonic):
             line = bytes(pending)
             if line.endswith(b"\r"):
                 line = line[:-1]
-            found = heartbeat_version(line)
+            found = heartbeat_version(line, allow_dynamic=version is not None)
             matched = found is not None and (version is None or found == version)
             timestamp = datetime.now(timezone.utc).isoformat()
             # Escape terminal controls, invalid bytes, and embedded CRs; never echo raw input.
@@ -113,11 +118,13 @@ def monitor(port, version=None, count=None, timeout=None, clock=time.monotonic):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--port", default="/dev/serial0")
-    parser.add_argument("--version", choices=VERSIONS, help="only count this exact version (default: any known)")
+    parser.add_argument("--version", help="only count this exact numeric semver (default: any)")
     parser.add_argument("--count", type=_positive_count, help="stop after N matching lines; default: continuous")
     parser.add_argument("--timeout", type=_positive_timeout,
                         help="overall observation deadline in seconds (default: 30 with --count)")
     args = parser.parse_args(argv)
+    if args.version is not None and not valid_version(args.version):
+        parser.error("version must be numeric semver")
     try:
         if Path(args.port).resolve() != Path("/dev/ttyAMA0"):
             raise MonitorError("port must resolve to /dev/ttyAMA0 (PL011), not mini-UART")

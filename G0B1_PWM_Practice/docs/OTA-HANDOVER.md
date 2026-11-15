@@ -8,6 +8,16 @@ session memory being available.
 
 ## Current milestone and scope
 
+**LATEST — deployment complete, activation pending:** User authorized deployment,
+enablement and one supervised cloud installation. See
+[CLOUD-INSTALL-TRIAL.md](CLOUD-INSTALL-TRIAL.md). Tested candidate copied to Pi,
+old source backed up; original config/release/staged image/catalog/baseline hashes
+unchanged. 310 Pi tests PASS in 43.060s after correcting a test-only serial alias
+expectation. OTA configuration initialized healthy/idle. Systemd unit verified
+but needs sudo authentication to install/enable. No MQTT client started or UART
+opened in this task yet. Laptop has no AWS CLI credentials; authorized AWS console
+publisher/observer session and fresh physical-state confirmation still needed.
+
 **Source-control update:** All gateway Python source/tests, dependency pins,
 safe configuration/service examples and original non-secret release approval
 are now included under [gateway/pi-client](../gateway/pi-client/README.md).

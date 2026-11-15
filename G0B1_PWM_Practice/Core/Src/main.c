@@ -21,6 +21,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#ifdef APP_STATE_TELEMETRY
+#include <string.h>
+#endif
 
 /* USER CODE END Includes */
 
@@ -50,6 +53,11 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 static UART_HandleTypeDef heartbeat_uart;
+#ifdef APP_STATE_TELEMETRY
+static uint8_t operating_state = 0;
+static uint32_t state_sequence = 0;
+static uint32_t state_last_tick = 0;
+#endif
 
 /* USER CODE END PV */
 
@@ -100,6 +108,55 @@ static void Heartbeat_UART_Init(void)
 }
 
 volatile uint8_t btn_dwn_press = 0, btn_up_press = 0, btn_press = 0;
+#ifdef APP_STATE_TELEMETRY
+/* Only the new release uses this demonstration state machine. B1 is PC13
+ * (main.h / CubeMX IOC), active low. No ISR formatting or blocking debounce.
+ * Keep a small formatter: pulling in printf risks exceeding the 20 KiB slot.
+ */
+static void State_Send(uint32_t now)
+{
+  static const char *const states[] = {"idle", "ready", "running", "paused", "fault"};
+  char line[192] = "{\"type\":\"state\",\"device_id\":\"stm32g0b1-01\",\"firmware\":\"" APP_VERSION "\",\"state\":\"";
+  char digits[10];
+  unsigned count = 0;
+  uint32_t sequence = state_sequence++;
+  strcat(line, states[operating_state]);
+  strcat(line, "\",\"sequence\":");
+  do {
+    digits[count++] = (char)('0' + sequence % 10U);
+    sequence /= 10U;
+  } while (sequence != 0U);
+  size_t length = strlen(line);
+  while (count != 0U) line[length++] = digits[--count];
+  line[length++] = '}';
+  line[length++] = '\r';
+  line[length++] = '\n';
+  HAL_UART_Transmit(&huart2, (uint8_t *)line, (uint16_t)length, 100U);
+  HAL_UART_Transmit(&heartbeat_uart, (uint8_t *)line, (uint16_t)length, 100U);
+  state_last_tick = now;
+}
+
+static void State_Service(uint32_t now)
+{
+  static GPIO_PinState candidate = GPIO_PIN_SET;
+  static GPIO_PinState stable = GPIO_PIN_SET;
+  static uint32_t changed_at = 0;
+  GPIO_PinState raw = HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin);
+  uint8_t changed = 0;
+  if (raw != candidate) {
+    candidate = raw;
+    changed_at = now;
+  }
+  if (stable != candidate && (uint32_t)(now - changed_at) >= 50U) {
+    stable = candidate;
+    if (stable == GPIO_PIN_RESET) {
+      operating_state = (operating_state + 1U) % 5U;
+      changed = 1;
+    }
+  }
+  if (changed || (uint32_t)(now - state_last_tick) >= 10000U) State_Send(now);
+}
+#endif
 volatile uint32_t t_btn_dwn_press = 0, t_btn_up_press = 0, t_btn_press = 0;
 /**
   * @brief  EXTI line detection callback.
@@ -315,6 +372,9 @@ int main(void)
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
   uint32_t last_serial_tick = HAL_GetTick();
   static const uint8_t serial_message[] = "Hello from NUCLEO-G0B1RE! firmware=" APP_VERSION "\r\n";
+#ifdef APP_STATE_TELEMETRY
+  State_Send(HAL_GetTick());
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -336,12 +396,16 @@ int main(void)
       HAL_UART_Transmit(&heartbeat_uart, serial_message, sizeof(serial_message) - 1U, 100U);
     }
 
+  #ifdef APP_STATE_TELEMETRY
+    State_Service(now);
+  #else
     determine_btn_press_time();
     if( btn_press )
     {
       increase_phase();
       btn_press = 0;
     }
+  #endif
 
 #if 0
     determine_btn_press_time();
@@ -646,6 +710,13 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_EnableIRQ(EXTI4_15_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
+#ifdef APP_STATE_TELEMETRY
+  /* New target polls the verified B1 pin; old targets retain exact EXTI setup. */
+  GPIO_InitStruct.Pin = B1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+#endif
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
