@@ -109,7 +109,7 @@ static void Heartbeat_UART_Init(void)
 
 volatile uint8_t btn_dwn_press = 0, btn_up_press = 0, btn_press = 0;
 #ifdef APP_STATE_TELEMETRY
-/* Only the new release uses this demonstration state machine. B1 is PC13
+/* Releases 0.4.0 onward use this demonstration state machine. B1 is PC13
  * (main.h / CubeMX IOC), active low. No ISR formatting or blocking debounce.
  * Keep a small formatter: pulling in printf risks exceeding the 20 KiB slot.
  */
@@ -135,6 +135,30 @@ static void State_Send(uint32_t now)
   HAL_UART_Transmit(&heartbeat_uart, (uint8_t *)line, (uint16_t)length, 100U);
   state_last_tick = now;
 }
+
+#ifdef APP_STATE_LED
+/* Full on/off cycle periods in ms, matching State_Send's state order.
+ * Paused (zero period) stays on. Start each state on; no blocking delays.
+ */
+static void State_LED_Service(uint32_t now)
+{
+  static const uint16_t periods[] = {2000U, 1000U, 500U, 0U, 100U};
+  static uint8_t previous_state = 255U;
+  static uint32_t cycle_start = 0;
+  if (previous_state != operating_state) {
+    previous_state = operating_state;
+    cycle_start = now;
+  }
+  uint32_t period = periods[operating_state];
+  uint32_t elapsed = (uint32_t)(now - cycle_start);
+  if (period != 0U) {
+    elapsed %= period;
+    cycle_start = now - elapsed;
+  }
+  HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin,
+                   (period == 0U || elapsed < period / 2U) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+#endif
 
 static void State_Service(uint32_t now)
 {
@@ -398,6 +422,9 @@ int main(void)
 
   #ifdef APP_STATE_TELEMETRY
     State_Service(now);
+  #ifdef APP_STATE_LED
+    State_LED_Service(HAL_GetTick());
+  #endif
   #else
     determine_btn_press_time();
     if( btn_press )

@@ -68,10 +68,10 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 )
 
 # Legacy variants retain their original behavior; 0.4.0 onward enables states.
-# Never overwrite published 0.1/0.2/0.3 artifacts: approval uses immutable hashes.
+# Never overwrite published artifacts: approval uses immutable hashes.
 # Outputs stay in the build tree; publishing releases is a separate action.
 get_target_property(APP_SOURCES ${CMAKE_PROJECT_NAME} SOURCES)
-foreach(VERSION IN ITEMS 0.1.0 0.2.0 0.3.0 0.4.0 0.5.0)
+foreach(VERSION IN ITEMS 0.1.0 0.2.0 0.3.0 0.4.0 0.5.0 0.6.0)
     string(REPLACE "." "_" VERSION_TARGET "${VERSION}")
     set(TARGET "firmware_${VERSION_TARGET}")
     add_executable(${TARGET} ${APP_SOURCES})
@@ -79,6 +79,10 @@ foreach(VERSION IN ITEMS 0.1.0 0.2.0 0.3.0 0.4.0 0.5.0)
     target_compile_definitions(${TARGET} PRIVATE APP_VERSION="${VERSION}")
     if(VERSION VERSION_GREATER_EQUAL "0.4.0")
         target_compile_definitions(${TARGET} PRIVATE APP_STATE_TELEMETRY=1)
+    endif()
+    # State LED patterns are inherited by all future release variants.
+    if(VERSION VERSION_GREATER_EQUAL "0.6.0")
+        target_compile_definitions(${TARGET} PRIVATE APP_STATE_LED=1)
     endif()
     set_target_properties(${TARGET} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/versions/${VERSION}"
@@ -89,3 +93,11 @@ foreach(VERSION IN ITEMS 0.1.0 0.2.0 0.3.0 0.4.0 0.5.0)
             "${CMAKE_BINARY_DIR}/versions/${VERSION}/firmware.bin"
         VERBATIM)
 endforeach()
+
+# Host-only LED timing regression; never connects to the board.
+enable_testing()
+add_test(NAME firmware_state_led
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DBINARY_DIR=${CMAKE_BINARY_DIR}
+        -P ${CMAKE_SOURCE_DIR}/tests/state_led_test.cmake)
