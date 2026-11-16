@@ -19,6 +19,8 @@ DEVICE = "stm32g0b1-01"
 TARGET = "stm32g0b1"
 PREFIX = "firmware/stm32g0b1/"
 SOURCE_CLOCK_SKEW_SECONDS = 0.1
+ARM_SECONDS = 120
+COMMAND_SECONDS = 900
 SEMVER = re.compile(r"(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\Z")
 STATES = {"idle", "ready", "running", "paused", "fault"}
 PHASES = ("accepted", "preparing", "downloading", "image_validated", "waiting_for_rom",
@@ -29,8 +31,10 @@ ERRORS = {"bootloader_timeout", "bootloader_sync_failed", "target_validation_fai
           "backup_failed", "programming_failed", "verification_failed", "application_start_timeout",
           "cancelled", "command_expired", "image_validation_failed", "download_not_approved",
           "download_failed", "download_validation_failed", "download_deadline_exceeded",
-          "internal_error", "interrupted", "installer_busy", "storage_error"}
+          "internal_error", "interrupted", "installer_busy", "storage_error",
+          "deployment_arm_expired", "invalid_deployment_arm", "deployment_disabled"}
 RELEASE_FIELDS = ("release_id", "version", "target", "size_bytes", "sha256", "status", "created_at")
+ARM_FIELDS = ("request_id", "device_id", "release_id", "from_version", "armed_at", "expires_at", "status")
 JOB_FIELDS = ("command_id", "device_id", "version", "from_version", "status", "phase",
               "created_at", "updated_at", "error", "flash_verified", "application_health_verified")
 
@@ -160,9 +164,13 @@ class Admin:
                 result = self.approve(path.split("/")[3])
             elif method == "GET" and path == "/api/deployments":
                 result = {"deployments": [projection(r, JOB_FIELDS) for r in self.store.list("job")]}
+            elif method == "POST" and path == "/api/deployment-arms":
+                self.require_deployment_enabled()
+                result = self.arm(self.body(event, ("device_id", "release_id", "request_id")))
+            elif method == "GET" and re.fullmatch(r"/api/deployment-arms/[^/]+", path):
+                result = self.arm_status(path.split("/")[3])
             elif method == "POST" and path == "/api/deployments":
-                if os.environ.get("FIRMWARE_DEPLOYMENT_ENABLED") == "false":
-                    raise Fault("deployment_disabled", 403)
+                self.require_deployment_enabled()
                 result = self.deploy(self.body(event, ("device_id", "release_id", "request_id")))
             else:
                 raise Fault("not_found", 404)
@@ -222,15 +230,17 @@ class Admin:
         payload = canonical(dict(schema=1, target=TARGET, version=row["version"],
                                  size_bytes=row["size_bytes"], sha256=row["sha256"], bucket=self.bucket,
                                  region=self.region, key=row["key"], version_id=row["version_id"]))
+        updated = dict(row, status="approved", release=self.sign(payload))
+        self.store.commit([("release", release_id, row, updated)])
+        return projection(updated, RELEASE_FIELDS)
+
+    def sign(self, payload):
         signed = self.kms.sign(KeyId=self.signing_key, Message=payload, MessageType="RAW",
                                SigningAlgorithm="RSASSA_PKCS1_V1_5_SHA_256")
         if len(signed["Signature"]) != 256:
             raise Fault("signing_failed", 503)
-        updated = dict(row, status="approved", release={"key_id": self.signing_key,
-                       "payload": base64.b64encode(payload).decode("ascii"),
-                       "signature": base64.b64encode(signed["Signature"]).decode("ascii")})
-        self.store.commit([("release", release_id, row, updated)])
-        return projection(updated, RELEASE_FIELDS)
+        return {"key_id": self.signing_key, "payload": base64.b64encode(payload).decode("ascii"),
+                "signature": base64.b64encode(signed["Signature"]).decode("ascii")}
 
     def devices(self):
         observation = self.store.get("observation", GATEWAY) or {}
@@ -247,30 +257,115 @@ class Admin:
                      last_seen=iso(seen) if seen is not None else None,
                      firmware=sub.get("firmware"), state=sub.get("state"), updating=sub.get("updating", False))]
 
-    def deploy(self, body):
+    @staticmethod
+    def require_deployment_enabled():
+        if os.environ.get("FIRMWARE_DEPLOYMENT_ENABLED") != "true":
+            raise Fault("deployment_disabled", 403)
+
+    @staticmethod
+    def request_id(value):
         try:
-            request = str(uuid.UUID(body["request_id"]))
+            request = str(uuid.UUID(value))
         except (ValueError, TypeError, AttributeError):
             raise Fault("invalid_request_id") from None
-        if body["request_id"] != request or body["device_id"] != DEVICE or not version(body["release_id"]):
+        if value != request:
+            raise Fault("invalid_request_id")
+        return request
+
+    def deployment_request(self, body):
+        request = self.request_id(body["request_id"])
+        if body["device_id"] != DEVICE or not version(body["release_id"]):
             raise Fault("invalid_deployment")
-        existing = self.store.get("job", request)
-        if existing:
-            if existing["release_id"] != body["release_id"] or existing["device_id"] != body["device_id"]:
-                raise Fault("request_id_reused", 409)
-            return projection(existing, JOB_FIELDS)
+        return request
+
+    @staticmethod
+    def matches(row, body):
+        return row["release_id"] == body["release_id"] and row["device_id"] == body["device_id"]
+
+    def ready_release(self, body):
         release = self.store.get("release", body["release_id"])
         if not release or release["status"] != "approved":
             raise Fault("release_not_approved", 409)
         observation = self.store.get("observation", GATEWAY)
         sub = (observation or {}).get("sub", {})
-        now = self.clock()
+        now = self.clock()  # Reads can take time; freshness is not checked against a stale sample.
         if (not observation or not 0 <= now - observation["seen"] <= 35 or
                 sub.get("seen") is None or not 0 <= now - sub["seen"] <= 35 or
                 sub.get("updating") or not version(sub.get("firmware"))):
             raise Fault("device_not_ready", 409)
+        return release, observation
+
+    def arm_projection(self, row):
+        result = projection(row, ARM_FIELDS)
+        if result["status"] == "armed" and self.clock() >= row["issued_at"] + ARM_SECONDS:
+            result["status"] = "expired"
+        return result
+
+    def arm_status(self, request):
+        row = self.store.get("arm", self.request_id(request))
+        if not row:
+            raise Fault("arm_not_found", 404)
+        return self.arm_projection(row)
+
+    def arm(self, body):
+        self.require_deployment_enabled()
+        request = self.deployment_request(body)
+        existing = self.store.get("arm", request)
+        if existing:
+            if not self.matches(existing, body):
+                raise Fault("request_id_reused", 409)
+            return self.arm_projection(existing)  # Never refresh or replace a permit.
+        if self.store.get("job", request):
+            raise Fault("arm_conflict", 409)  # Legacy job IDs cannot become new permits.
+        release, observation = self.ready_release(body)
+        sub = observation["sub"]
         if sub["firmware"] == release["version"]:
             raise Fault("same_version", 409)
+        issued = int(self.clock())
+        row = dict(request_id=request, device_id=DEVICE, gateway_id=GATEWAY,
+                   release_id=release["release_id"], from_version=sub["firmware"],
+                   armed_at=iso(issued), expires_at=iso(issued + ARM_SECONDS), issued_at=issued,
+                   status="armed", release_snapshot=release,
+                   release_sha256=hashlib.sha256(canonical(release["release"])).hexdigest())
+        try:
+            self.store.commit([("arm", request, None, row),
+                               ("job", request, None, None), ("lease", GATEWAY, None, None),
+                               ("observation", GATEWAY, observation, observation),
+                               ("release", release["release_id"], release, release)])
+        except Conflict:
+            existing = self.store.get("arm", request)
+            if existing and self.matches(existing, body):
+                return self.arm_projection(existing)
+            raise Fault("arm_conflict", 409) from None
+        return self.arm_projection(row)
+
+    def deploy(self, body):
+        self.require_deployment_enabled()
+        request = self.deployment_request(body)
+        existing = self.store.get("job", request)
+        if existing:
+            if not self.matches(existing, body):
+                raise Fault("request_id_reused", 409)
+            return projection(existing, JOB_FIELDS)
+        arm = self.store.get("arm", request)
+        if not arm:
+            raise Fault("arm_required", 409)
+        if not self.matches(arm, body) or arm["gateway_id"] != GATEWAY:
+            raise Fault("arm_mismatch", 409)
+        if arm["status"] != "armed":
+            raise Fault("arm_consumed", 409)
+        now = self.clock()
+        issued = arm["issued_at"]
+        if not issued <= now < issued + ARM_SECONDS:
+            raise Fault("arm_expired", 409)
+        release, observation = self.ready_release(body)
+        sub = observation["sub"]
+        if (release != arm["release_snapshot"] or sub["firmware"] != arm["from_version"] or
+                hashlib.sha256(canonical(release["release"])).hexdigest() != arm["release_sha256"]):
+            raise Fault("arm_mismatch", 409)
+        now = self.clock()
+        if not issued <= now < issued + ARM_SECONDS:
+            raise Fault("arm_expired", 409)
         row = dict(command_id=request, device_id=DEVICE, gateway_id=GATEWAY,
                    release_id=release["release_id"], version=release["version"], from_version=sub["firmware"],
                    status="error", phase="dispatch_unknown", error="dispatch_unknown",
@@ -279,21 +374,32 @@ class Admin:
         # Pessimistic durable intent: even a crash just after this transaction holds
         # the lease forever until a matching terminal ACK or explicit operator investigation.
         try:
-            self.store.commit([("job", request, None, row),
+            self.store.commit([("arm", request, arm, dict(arm, status="consumed")),
+                               ("job", request, None, row),
                                ("lease", GATEWAY, None, {"command_id": request}),
                                ("observation", GATEWAY, observation, observation),
                                ("release", release["release_id"], release, release)])
         except Conflict:
             existing = self.store.get("job", request)
-            if existing and existing["release_id"] == body["release_id"]:
+            if existing and self.matches(existing, body):
                 return projection(existing, JOB_FIELDS)
             raise Fault("deployment_conflict", 409) from None
         try:
+            # Keep the ORIGINAL arm/command deadlines. Slow preparation must not
+            # extend admission; at admission there are >780 seconds of command TTL.
+            if not issued <= self.clock() < issued + ARM_SECONDS:
+                self.finish_without_publish(request, "arm_expired")
+                return projection(self.store.get("job", request), JOB_FIELDS)
             url = self.s3.generate_presigned_url("get_object", Params={"Bucket": self.bucket,
                 "Key": release["key"], "VersionId": release["version_id"]}, ExpiresIn=900)
+            permit = self.sign(canonical(dict(schema=1, purpose="deploy_firmware", command_id=request,
+                gateway_id=GATEWAY, device_id=DEVICE, version=release["version"],
+                from_version=arm["from_version"], sha256=release["sha256"],
+                release_sha256=arm["release_sha256"], issued_at=issued,
+                arm_expires_at=issued + ARM_SECONDS, expires_at=issued + COMMAND_SECONDS)))
             command = canonical(dict(command_id=request, command="install_firmware", version=release["version"],
-                from_version=sub["firmware"], sha256=release["sha256"], expires_at=int(now) + 900,
-                url=url, release=release["release"]))
+                from_version=arm["from_version"], sha256=release["sha256"], expires_at=issued + COMMAND_SECONDS,
+                url=url, release=release["release"], deployment_arm=permit))
             if len(command) > 8192:
                 self.finish_without_publish(request, "command_too_large")
                 return projection(self.store.get("job", request), JOB_FIELDS)
@@ -301,6 +407,9 @@ class Admin:
             self.finish_without_publish(request, "dispatch_preparation_failed")
             return projection(self.store.get("job", request), JOB_FIELDS)
         # Exactly one SDK attempt: AWS adapter disables automatic publish retries.
+        if not issued <= self.clock() < issued + ARM_SECONDS:
+            self.finish_without_publish(request, "arm_expired")
+            return projection(self.store.get("job", request), JOB_FIELDS)
         try:
             self.iot.publish(topic="lab/pi-lab-01/commands", qos=1, payload=command)
         except Exception:

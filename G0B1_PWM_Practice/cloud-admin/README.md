@@ -1,4 +1,8 @@
-# Backend infrastructure (deployment disabled)
+# Backend infrastructure (default-disabled emergency gate)
+
+Current live configuration uses mandatory single-use arms with emergency master
+gates enabled. See [rollout evidence](../docs/ADMIN-SINGLE-USE-ARM-DEPLOYMENT.md).
+The default for a new stack remains disabled; there is no automatic deployment.
 
 [template.yaml](template.yaml) provisions only the admin backend in account
 **844274146091**, Sydney (**ap-southeast-2**). It does not create frontend hosting,
@@ -11,18 +15,14 @@ Separate frontend infrastructure and publishing are described in
 
 ## Safety boundary
 
-**Firmware deployment is deliberately unavailable.** Neither Lambda execution
-role has `iot:Publish` (or any IoT action). There is no parameter that enables it.
-Upload, approval, dashboard/history, and telemetry/ACK ingestion are provisioned;
-publishing an installation command is not authorized.
-
-The HTTP function sets `FIRMWARE_DEPLOYMENT_ENABLED=false`.
-`POST /api/deployments` returns `403 deployment_disabled` before any job/lease
-write or publish attempt. An offline regression test verifies no external effects.
-IAM separately prevents publishing if the application gate is accidentally removed.
-A future enablement requires a
-separate reviewed IAM change, gateway trust setup, and explicit hardware approval.
-Do not attach extra policies to these roles to bypass the initial safety boundary.
+**Firmware deployment defaults off.** `FirmwareDeploymentEnabled=false` omits
+HTTP `iot:Publish` permission and sets `FIRMWARE_DEPLOYMENT_ENABLED=false`.
+Only the exact runtime string `true` enables arm/deploy POSTs; unset, malformed,
+or differently cased values fail closed with `403 deployment_disabled` before
+effects. The parameter's explicit `true` condition grants publishing to the exact
+gateway command topic, but does not bypass the single-use arm requirement.
+Ingestion never has IoT/S3/KMS permissions. Enablement requires reviewed gateway
+trust/configuration and explicit operator approval, not extra bypass policies.
 
 HTTP and ingestion use separate functions, separate least-privilege roles, and
 the same `backend.handler` entrypoint. Only API Gateway can invoke the HTTP
@@ -51,6 +51,70 @@ The existing IoT certificate policy must already bind client ID `pi-lab-01` and
 the expected topics to the authorized gateway; these rules do not create or
 modify that policy. Initial rule creation may precede its Lambda permission;
 messages in that short provisioning window are not guaranteed to be delivered.
+
+## Single-use deployment arms
+
+All data routes require the same administrator access token. Both POSTs accept
+exactly `device_id`, `release_id`, and canonical UUID `request_id`; the deployment
+must reuse its arm's UUID. Client-provided lifetimes, predecessor versions,
+envelopes, or extra fields are rejected.
+
+- `POST /api/deployment-arms`: validates approved release, fresh gateway/UART
+  observations, known predecessor firmware, different target version, and no
+  active lease. Atomically creates an immutable arm and checks the observation,
+  release, absent job and absent lease. No KMS, S3, MQTT, job creation, lease
+  creation, download or programming occurs. Multiple reviewed UUIDs can coexist;
+  the gateway lease still admits only one deployment at a time.
+- `GET /api/deployment-arms/{request_id}`: read-only, even while disabled.
+  Returns `request_id`, `device_id`, `release_id`, `from_version`, UTC `armed_at`,
+  UTC `expires_at`, and `status` (`armed`, `expired`, `consumed`). Expiry is
+  calculated without a write; consumed takes precedence over expired. Unknown
+  IDs return `404 arm_not_found`.
+- An arm lasts exactly 120 seconds from its integer-second creation timestamp;
+  the deadline is exclusive. Repeating the same arm POST returns its original
+  state without extending it; rebinding the UUID is rejected. Expired/consumed
+  rows are permanent tombstones, not DynamoDB TTL records. Legacy job IDs cannot
+  become new arms.
+- `POST /api/deployments`: requires that stored arm, unchanged original
+  `from_version`, fresh observations and the exact approved release snapshot
+  (including object version, signed envelope and revision). New observations
+  with the same predecessor are allowed. Changed release/predecessor, stale
+  observations, expiry or missing arm do not consume it or publish anything.
+  The transaction consumes the arm and creates the pessimistic job plus gateway
+  lease together, condition-checking the observation and release. Conflicts have
+  no partial writes. Existing matching jobs reconcile without signing,
+  presigning, consuming again or republishing, even after expiry.
+
+The stored arm pins the release envelope and SHA-256 of its canonical JSON.
+After consumption, KMS signs a separate `deployment_arm` envelope using exactly
+the release envelope format and pinned RSA-2048 PKCS#1 v1.5 SHA-256 key. Its
+payload is exactly `schema=1`, `purpose=deploy_firmware`, `command_id`,
+`gateway_id`, `device_id`, `version`, `from_version`, `sha256`, `release_sha256`,
+`issued_at`, `arm_expires_at`, `expires_at`. `issued_at` is the original arm
+creation time, **not dispatch time**; deadlines are `issued_at+120` and
+`issued_at+900`. This preserves genuine admission lifetime with over 780 seconds
+of command lifetime remaining at admission. Slow preparation cannot extend the
+arm: the backend rechecks expiry before publishing, and the gateway enforces
+the signed deadline after verification. No API response exposes envelopes,
+S3 URLs, object identifiers, or signatures.
+
+Preparation/signing failure burns the arm, records a terminal job and releases
+the lease without publishing. An uncertain publish retains the pessimistic
+job/lease for investigation or a matching terminal ACK; it is never retried.
+Expiry during a committed transaction/preparation also burns the arm but cannot
+start MQTT dispatch after the final expiry check. As with any distributed
+deadline, in-flight MQTT delivery may arrive late; the gateway journals the
+authentic `deployment_arm_expired` rejection and the backend ingests it to
+release the matching lease. Transient unjournaled gateway errors with no
+`event_seq` remain rejected, not treated as proof of terminal completion.
+
+[test_deployment_arms.py](test_deployment_arms.py) tests the API, no-effect
+boundaries, races, signature payload and a real RSA/SDK-presigned cloud command
+through the unchanged gateway verifier and durable OTA journal. Network and
+hardware remain forbidden; only the installer is mocked. Gateway tests are not
+modified. [smoke_test.py](smoke_test.py) checks public auth/CORS for the new routes;
+it only attempts empty arm/deploy POSTs when runtime and stack disablement are
+confirmed. Do not run live smoke checks as part of offline validation.
 
 ## Prerequisites (operator checks; not performed here)
 

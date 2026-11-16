@@ -1,10 +1,11 @@
 # Signed releases and UART telemetry (gateway only)
 
 Implements the gateway portion of [the admin contract](../../docs/ADMIN-MVP-CONTRACT.md).
-The original implementation was an offline-tested candidate. A telemetry-only Pi
-deployment is now verified; see [deployment evidence](../../docs/ADMIN-BACKEND-DEPLOYMENT.md).
-Firmware installation remains disabled locally and in the cloud; no signed OTA or
-0.4.0 physical/button result is claimed.
+The mandatory single-use-arm policy is now deployed; see
+[current deployment evidence](../../docs/ADMIN-SINGLE-USE-ARM-DEPLOYMENT.md).
+Both emergency master gates are enabled, but each installation requires a new
+signed, unexpired, single-use authorization. The earlier supervised signed 0.4.0
+installation and button checks are recorded in [the trial](../../docs/ADMIN-OTA-040-TRIAL.md).
 Keep the existing `pi-iot-ota.service`, its identity/certificates, staging approval,
 local release catalog/images, original baseline, run backups and OTA journal.
 Do not start another client with the same MQTT client ID or another UART console.
@@ -23,6 +24,12 @@ the existing OTA configuration, preserving all existing paths and download appro
   Set `false` during telemetry-only commissioning. New install requests are rejected
   with `deployment_disabled` before journal writes or worker creation. Existing
   duplicate job results remain available; this is not cancellation of active work.
+- `require_deployment_arm`: strict boolean (absent defaults to `false` for legacy
+  configurations). `true` requires `signed_releases` and a valid signed single-use
+  deployment permit on every new install. A supplied permit is always checked,
+  even when this flag is false; without a configured verifier it is rejected.
+  The signed example enables this policy but keeps `install_enabled: false`.
+  Both a valid arm and `install_enabled: true` are necessary for new work.
 - `signed_releases`: object containing **exactly**:
   - `public_key`: local RSA-2048 public PEM path, proposed `release-signing-public.pem`.
     Provision through a trusted channel; no private signing key belongs on the Pi.
@@ -90,6 +97,65 @@ URLs and envelopes are transient worker inputs, not persisted command contents.
 The journal retains a request fingerprint and fixed public status/error fields.
 QoS redelivery returns the existing durable job; it never repeats an install.
 Reusing an ID with changed fields conflicts. There is no automatic retry/rollback.
+
+## Short-lived dashboard deployment arm
+
+After one-time trusted provisioning, the dashboard calls
+`POST /api/deployment-arms` and then `POST /api/deployments`, using the same
+`{device_id, release_id, request_id}`. Arming returns metadata, not a download or
+installation. The backend requires an existing arm for deployment and publishes
+its signed envelope as `deployment_arm`. No per-update SSH/configuration toggle
+is part of this flow. Physical BOOT0/B2 supervision remains unchanged.
+
+The extra command field is allowed **only alongside `url` and `release`**. Its
+envelope has exactly `key_id`, `payload`, `signature`, using the same locally
+pinned RSA-2048 key/ARN and PKCS#1 v1.5 SHA-256 as releases. Original decoded
+bytes are signature-verified before JSON parsing and must then equal canonical
+JSON. The payload has exactly:
+
+| Field | Required value |
+| --- | --- |
+| `schema` | integer `1`, not a boolean or float |
+| `purpose` | `deploy_firmware` |
+| `command_id` | canonical lowercase hyphenated UUID, equal to command ID |
+| `gateway_id` | locally configured MQTT client ID (`pi-lab-01` here) |
+| `device_id` | `stm32g0b1-01`, the gateway's supported subdevice |
+| `version`, `from_version` | numeric semver, exactly matching command fields |
+| `sha256` | lowercase SHA-256, exactly matching command field |
+| `release_sha256` | lowercase SHA-256 of canonical JSON of the complete `release` envelope |
+| `issued_at` | nonnegative integer epoch seconds |
+| `arm_expires_at` | exactly `issued_at + 120` |
+| `expires_at` | exactly `issued_at + 900`, equal to command expiry |
+
+The coordinator verifies cryptography, exact types, identity and bindings before
+any new journal consumption, worker start, monitor handoff, UART or download.
+Admission uses a fresh clock sample **after verification**:
+`issued_at <= now + 1` and `now < arm_expires_at`. Only future-issued timestamps
+get a maximum one-second skew tolerance; expiry has none. No unsigned flag,
+expiry, identity, or release approval substitutes for the signed permit.
+
+Invalid/missing permits produce transient `invalid_deployment_arm` with no
+worker or journal entry. Authentic, correctly bound expired permits instead get
+a durable `rejected` tombstone with `deployment_arm_expired`, a version, false
+verification flags and a positive `event_seq`, including arrival after command
+expiry. The backend must accept this terminal error to clear its matching lease.
+Existing storage/capacity/closed/emergency-master gates still fail closed.
+
+The command UUID **is** the single-use arm ID. Existing non-evicted journal
+records consume it atomically before thread start; no second ledger or reseeding
+is needed. Identical ID/fingerprint redelivery returns its existing result even
+after expiry, restart or master disable. Changed fields under an existing ID
+conflict, and changing the ID cannot reuse the signed permission. A restart
+marks interrupted work rather than executing it again. Protect and retain this
+journal: deleting it destroys the single-use guarantee.
+
+The 120-second deadline is **admission only**. After durable acceptance it is
+not rechecked during backup/programming. The existing signed 900-second command
+deadline is still checked at worker entry and before UART/erase; after erase,
+bounded programming and full readback continue rather than abandoning flash.
+`from_version` remains checked against the installer's persisted predecessor
+and full target backup. No automatic boot, retry, rollback, or new GPIO behavior.
+Only fingerprints/status are persisted, never permit payloads/signatures or URLs.
 
 ## Predecessor persistence and flash safety
 

@@ -49,7 +49,7 @@ class ReleaseVerifier:
             raise ValueError("invalid_signing_configuration")
         self.key_id, self.bucket, self.region = key_id, bucket, region
 
-    def verify(self, envelope):
+    def _payload(self, envelope):
         """Verify ORIGINAL bytes before JSON parsing; no key lookup or network."""
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
@@ -65,7 +65,16 @@ class ReleaseVerifier:
                 raise ValueError()
             self.key.verify(signature, payload, padding.PKCS1v15(), hashes.SHA256())
             data = json.loads(payload.decode("utf-8"), object_pairs_hook=unique)
-            if (type(data) is not dict or set(data) != FIELDS or canonical(data) != payload or
+            if type(data) is not dict or canonical(data) != payload:
+                raise ValueError()
+            return data
+        except Exception:
+            raise ValueError("invalid_signed_release") from None
+
+    def verify(self, envelope):
+        try:
+            data = self._payload(envelope)
+            if (set(data) != FIELDS or
                     type(data["schema"]) is not int or data["schema"] != 1 or
                     data["target"] != "stm32g0b1" or not version(data["version"]) or
                     type(data["size_bytes"]) is not int or not 8 <= data["size_bytes"] <= 20480 or

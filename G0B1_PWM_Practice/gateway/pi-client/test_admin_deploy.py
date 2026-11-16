@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import os
 import sys
 from unittest.mock import Mock, patch
 
@@ -19,6 +20,9 @@ import rom_program
 import signed_release
 import uart_state
 import verified_state
+from deployment_arm import DeploymentArmVerifier
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 from test_ota_installer import InstallerFixture
 from test_signed_release import KEY_ID, envelope, key_fixture, payload, url
 
@@ -34,6 +38,9 @@ REQUEST = "00000000-0000-4000-8000-000000000040"
 class AdminDeployTests(InstallerFixture):
     def setUp(self):
         super().setUp()
+        enabled = patch.dict(os.environ, {"FIRMWARE_DEPLOYMENT_ENABLED": "true"})
+        enabled.start()
+        self.addCleanup(enabled.stop)
         self.guards = []
         for target in ("socket.socket", "socket.create_connection", "socket.getaddrinfo",
                        "pty.openpty", "rom_program.open_port", "heartbeat_monitor.open_port"):
@@ -61,12 +68,22 @@ class AdminDeployTests(InstallerFixture):
         self.s3.generate_presigned_url.return_value = url(self.metadata)
         self.iot = Mock(spec_set=["publish"])
         self.kms = Mock(spec_set=["sign"])
+        def sign(**kwargs):
+            self.assertEqual(kwargs["KeyId"], KEY_ID)
+            self.assertEqual(kwargs["MessageType"], "RAW")
+            self.assertEqual(kwargs["SigningAlgorithm"], "RSASSA_PKCS1_V1_5_SHA_256")
+            return {"Signature": key.sign(kwargs["Message"], padding.PKCS1v15(), hashes.SHA256())}
+        self.kms.sign.side_effect = sign
         self.admin = Admin(self.store, self.s3, self.kms, self.iot, self.metadata["bucket"],
                            self.metadata["region"], KEY_ID, "offline-issuer", "offline-client",
                            clock=lambda: NOW)
 
     def dispatch(self):
-        result = self.admin.deploy(dict(device_id=DEVICE, release_id="0.4.0", request_id=REQUEST))
+        body = dict(device_id=DEVICE, release_id="0.4.0", request_id=REQUEST)
+        self.admin.arm(body)
+        self.iot.publish.assert_not_called()
+        self.s3.generate_presigned_url.assert_not_called()
+        result = self.admin.deploy(body)
         self.assertEqual(result["status"], "dispatched")
         self.assertEqual(self.iot.publish.call_count, 1)
         sent = self.iot.publish.call_args.kwargs
@@ -74,21 +91,27 @@ class AdminDeployTests(InstallerFixture):
         self.s3.generate_presigned_url.assert_called_once_with("get_object", Params={
             "Bucket": self.metadata["bucket"], "Key": self.metadata["key"],
             "VersionId": self.metadata["version_id"]}, ExpiresIn=900)
-        self.kms.sign.assert_not_called()
+        self.kms.sign.assert_called_once()
         self.raw = sent["payload"]
         self.command = json.loads(self.raw)
         # Boolean equality prevents a failing assertion from printing signed data.
         self.assertTrue(self.command == dict(command_id=REQUEST, command="install_firmware",
                         version="0.4.0", from_version="0.3.0", sha256=self.metadata["sha256"],
                         expires_at=NOW + 900, url=self.s3.generate_presigned_url.return_value,
-                        release=self.release), "Admin command contract changed")
+                        release=self.release, deployment_arm=self.command["deployment_arm"]),
+                        "Admin command contract changed")
+        permit = DeploymentArmVerifier(self.installer.verifier, GATEWAY)(self.command)
+        self.assertEqual((permit["issued_at"], permit["arm_expires_at"], permit["expires_at"]),
+                         (NOW, NOW + 120, NOW + 900))
 
     def run_gateway(self):
         self.received = []
         self.validation_errors = []
         monitor = Mock(spec_set=["pause", "resume"])
         wrapped = uart_state.MonitoredInstaller(self.installer, monitor)
-        jobs = ota_jobs.OtaJobs(GATEWAY, self.root / "jobs", wrapped, clock=lambda: NOW)
+        jobs = ota_jobs.OtaJobs(GATEWAY, self.root / "jobs", wrapped, clock=lambda: NOW,
+            deployment_arm_verifier=DeploymentArmVerifier(self.installer.verifier, GATEWAY),
+            require_deployment_arm=True)
         self.addCleanup(jobs.close)
         real_command = self.installer._command
         real_validate = firmware.FirmwareStager.validate
@@ -131,7 +154,8 @@ class AdminDeployTests(InstallerFixture):
             guard.assert_not_called()
         persisted = "".join(path.read_text() for path in jobs.state_root.glob("*.json"))
         public = json.dumps(final) + persisted + self.output.getvalue()
-        for secret in (self.command["url"], self.release["payload"], self.release["signature"]):
+        for secret in (self.command["url"], self.release["payload"], self.release["signature"],
+                   self.command["deployment_arm"]["payload"], self.command["deployment_arm"]["signature"]):
             self.assertFalse(secret in public, "Sensitive command data leaked")
         jobs.close()
         return final
@@ -144,6 +168,38 @@ class AdminDeployTests(InstallerFixture):
         self.assertEqual((self.catalog_calls, self.predecessor_calls, self.download_calls), (1, 1, 1))
         self.assertEqual(self.validation_errors, [])
         self.assertEqual(len(list(self.installer.run_root.glob("rom-*"))), 1)
+
+    def test_expired_arm_gateway_ack_clears_backend_lease_without_installing(self):
+        self.dispatch()
+        late = NOW + 901  # Even delivery after the command deadline must terminate the job.
+        self.admin.clock = lambda: late
+        worker = Mock(side_effect=AssertionError("expired arm must not install"))
+        jobs = ota_jobs.OtaJobs(GATEWAY, self.root / "jobs", worker, clock=lambda: late,
+            deployment_arm_verifier=DeploymentArmVerifier(self.installer.verifier, GATEWAY),
+            require_deployment_arm=True)
+        self.addCleanup(jobs.close)
+        final = client.CommandHandler(GATEWAY, ota=jobs).handle(self.raw, 0)
+        self.assertEqual((final["status"], final["error"], final["event_seq"]),
+                         ("rejected", "deployment_arm_expired", 1))
+        self.assertIsNone(jobs._worker)
+        worker.assert_not_called()
+        self.assertIsNotNone(self.store.get("lease", GATEWAY))
+        event = dict(final, ingest_type="ack", ingest_topic="lab/pi-lab-01/acks",
+                     ingest_client_id=GATEWAY, ingest_received_at=late * 1000)
+        self.assertEqual(self.admin.ingest(event), {"ok": True})
+        stored = self.store.get("job", REQUEST)
+        self.assertTrue(stored["terminal"])
+        self.assertEqual(stored["error"], "deployment_arm_expired")
+        self.assertIsNone(self.store.get("lease", GATEWAY))
+        self.assertTrue(jobs.mark_delivered(REQUEST, final["event_seq"]))
+        jobs.close()
+        restarted = ota_jobs.OtaJobs(GATEWAY, self.root / "jobs", worker, clock=lambda: late,
+            deployment_arm_verifier=DeploymentArmVerifier(self.installer.verifier, GATEWAY),
+            require_deployment_arm=True)
+        self.addCleanup(restarted.close)
+        self.assertEqual(restarted.submit(self.command), final)
+        self.assertEqual(restarted.pending_results(), [])
+        worker.assert_not_called()
 
     def test_nonregional_url_reproduces_accepted_seq2_despite_independent_checks_passing(self):
         self.s3.generate_presigned_url.return_value = url(self.metadata).replace(

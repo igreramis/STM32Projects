@@ -77,6 +77,8 @@ export function Console({ runtime }: { runtime: Runtime }) {
       try {
         const next = await runtime.api.snapshot(controller.signal)
         if (controller.signal.aborted) return
+        if (!mutation.current) await requestState.request?.reconcileArm(runtime.api, controller.signal)
+        if (controller.signal.aborted) return
         requestState.request?.reconcile(next.deployments.map(j => j.command_id))
         setPending(requestState.request?.current ?? null)
         setData(next); setNow(Date.now()); setLoaded(true); setPollError(''); setLastSync(new Date().toISOString())
@@ -96,6 +98,12 @@ export function Console({ runtime }: { runtime: Runtime }) {
   const chosenRelease = data.releases.find(r => r.release_id === releaseId)
   const selectedRelease = pending?.release_id ?? releaseId
   const blocked = authExpired ? 'Sign in again to continue.' : requestState.error ? 'Session storage is unavailable or a saved request is invalid. Deployment is locked for safety.' : pollError ? 'Refresh successfully before deploying.' : !loaded ? 'Waiting for device observations.' : deployBlock(data, selected, selectedRelease, now)
+  const canSend = requestState.request?.canSend(device?.firmware, now) ?? false
+  const canAbandon = requestState.request?.canAbandon(now) ?? false
+  const armMessage = pending?.stage === 'deploy_pending' ? 'Deployment response uncertain. Reconcile deployment history; do not send again or start a new request.'
+    : pending?.stage === 'arm_pending' ? 'Arm response uncertain. Refresh to check this request; no deployment can be sent until the arm is verified.'
+    : pending?.stage === 'armed' ? canAbandon ? 'Arm expired. No deployment was sent. Abandon this unused arm, then review and arm again.'
+      : `Armed · ${Math.max(0, Math.ceil((Date.parse(pending.arm.expires_at) - now) / 1000))}s remaining. Arming does not publish or install firmware.` : ''
   const sortedJobs = [...data.deployments].sort((a, b) => b.created_at.localeCompare(a.created_at))
   const gateways = data.devices.filter(d => d.kind === 'gateway')
   const subdevices = data.devices.filter(d => d.kind === 'subdevice')
@@ -118,17 +126,32 @@ export function Console({ runtime }: { runtime: Runtime }) {
       if (!controller.signal.aborted) { setBusy(false); setPending(requestState.request?.current ?? null) }
     }
   }
+  function armDeployment() {
+    // eslint-disable-next-line react-hooks/purity -- click handler must recheck actual observation age, not render time.
+    if (blocked || pending || !requestState.request || deployBlock(data, selected, selectedRelease, Date.now())) return
+    void action(signal => requestState.request!.arm(runtime.api, selectedRelease, signal), 'Deployment armed. Review the versions, then separately confirm and send before expiry.')
+  }
+  function abandonArm() {
+    if (busy || authExpired || !requestState.request?.canAbandon()) return
+    try { requestState.request.abandon(); setPending(null); setModal('deploy'); setNotice('') }
+    catch { setNotice('The saved request could not be cleared. Deployment remains locked.') }
+  }
+  function signOut() {
+    setAuthExpired(true); setModal(null)
+    void action(() => runtime.logout(), 'Signed out.')
+  }
   function confirmDeploy() {
     // Recheck at confirmation; the modal never freezes observation freshness.
-    if (blocked || !requestState.request || deployBlock(data, selected, selectedRelease, Date.now())) return
+    // eslint-disable-next-line react-hooks/purity -- click handler must recheck actual observation age, not render time.
+    if (blocked || !requestState.request?.canSend(device?.firmware) || deployBlock(data, selected, selectedRelease, Date.now())) return
     setModal(null)
     void action(async signal => {
-      const job = await requestState.request!.submit(runtime.api, selectedRelease, signal)
+      const job = await requestState.request!.submit(runtime.api, device?.firmware, signal)
       if (!signal.aborted) {
         setData(previous => ({ ...previous, deployments: [job, ...previous.deployments.filter(j => j.command_id !== job.command_id)] }))
         setPage('Deployments')
       }
-    }, runtime.demo ? 'Simulated deployment created. No command was sent.' : 'Request recorded. Follow reported progress below; dispatch alone is not verification.')
+    }, runtime.demo ? 'Simulated deployment created. No command was sent.' : 'Request recorded. Follow physical prompts in Pi journal. Dispatch alone is not verification.')
   }
 
   return <div className="app-shell">
@@ -136,25 +159,25 @@ export function Console({ runtime }: { runtime: Runtime }) {
       <nav aria-label="Main navigation">{([{ name: 'Overview', icon: LayoutDashboard }, { name: 'Devices', icon: Cpu }, { name: 'Firmware', icon: Box }, { name: 'Deployments', icon: History }] as const).map(({ name, icon: Icon }) => <button key={name} className={`nav-item ${page === name ? 'active' : ''}`} aria-current={page === name ? 'page' : undefined} onClick={() => setPage(name)}><Icon size={19} />{name}{name === 'Devices' && <span className="nav-count">{data.devices.length || '—'}</span>}</button>)}
         <div className="nav-divider" /><button className="nav-item" disabled><Plus size={19} />Onboarding<span className="soon">Soon</span></button><button className="nav-item" disabled><Activity size={19} />Telemetry<span className="soon">Soon</span></button>
       </nav>
-      <div className="sidebar-bottom"><div className="security-note"><ShieldCheck size={20} /><strong>Verified by design</strong><p>Approved releases. Explicit deployment. Reported verification.</p></div><div className="account"><span className="avatar">AD</span><div><strong>Administrator</strong><small>{runtime.demo ? 'Demo workspace' : 'Secure session'}</small></div>{!runtime.demo && <button className="icon-button" aria-label="Sign out" onClick={() => void action(() => runtime.logout(), 'Signed out.')} disabled={busy}><LogOut size={18} /></button>}</div></div>
+      <div className="sidebar-bottom"><div className="security-note"><ShieldCheck size={20} /><strong>Verified by design</strong><p>Approved releases. Explicit deployment. Reported verification.</p></div><div className="account"><span className="avatar">AD</span><div><strong>Administrator</strong><small>{runtime.demo ? 'Demo workspace' : 'Secure session'}</small></div>{!runtime.demo && <button className="icon-button" aria-label="Sign out" onClick={signOut} disabled={busy}><LogOut size={18} /></button>}</div></div>
     </aside>
-    <div className="main-shell"><header className="topbar"><div className="breadcrumb">Workspace <ChevronRight size={14} /><strong>{page}</strong></div><div className="topbar-right"><span className={`environment ${runtime.demo ? 'demo' : ''}`}><span className="status-dot" />{runtime.demo ? 'DEMO ENVIRONMENT' : 'LIVE ENVIRONMENT'}</span><span className="avatar compact">AD</span>{!runtime.demo && <button className="icon-button mobile-logout" aria-label="Sign out" disabled={busy} onClick={() => void action(() => runtime.logout(), 'Signed out.')}><LogOut size={18} /></button>}</div></header>
+    <div className="main-shell"><header className="topbar"><div className="breadcrumb">Workspace <ChevronRight size={14} /><strong>{page}</strong></div><div className="topbar-right"><span className={`environment ${runtime.demo ? 'demo' : ''}`}><span className="status-dot" />{runtime.demo ? 'DEMO ENVIRONMENT' : 'LIVE ENVIRONMENT'}</span><span className="avatar compact">AD</span>{!runtime.demo && <button className="icon-button mobile-logout" aria-label="Sign out" disabled={busy} onClick={signOut}><LogOut size={18} /></button>}</div></header>
       {runtime.demo && <div className="demo-banner" role="status"><FlaskConical size={17} /><strong>DEMO MODE</strong><span>Fixture data only. All actions are simulated; no cloud requests or device commands.</span></div>}
       <main className="main-content"><div className="page-heading"><div><p className="eyebrow">YOUR EDGE, AT A GLANCE</p><h1>{page === 'Overview' ? 'Workspace overview' : page === 'Firmware' ? 'Firmware releases' : page === 'Deployments' ? 'Deployment activity' : 'Device inventory'}</h1><p>{page === 'Overview' ? 'Monitor your devices. Ship with confidence.' : page === 'Firmware' ? 'A controlled path from binary to approved release.' : page === 'Deployments' ? 'Track every release from dispatch to application verification.' : 'Connectivity and operating state, clearly separated.'}</p></div><button className="secondary" onClick={refresh} disabled={busy || authExpired}><RefreshCw size={16} />Refresh</button></div>
         <div className="sync-line"><span className={`status-dot ${pollError ? 'amber-dot' : ''}`} />{pollError ? 'Updates interrupted · showing last known data' : loaded ? `Last synced ${dateTime(lastSync)} · refreshes every 5s` : 'Loading workspace…'}</div>
         {pollError && <div className="alert error" role="alert">{pollError}</div>}
         {authExpired && <div className="alert"><span>Session expired. Actions are locked.</span><button onClick={() => void runtime.login().catch(() => setNotice('Sign-in could not be started.'))}>Sign in again</button></div>}
         {notice && <div className="alert" role="status"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={16} /></button></div>}
-        {pending && <div className="alert warning" role="alert"><div><strong>Deployment response uncertain</strong><p>Refresh to reconcile, or explicitly retry the same request. A new command will not be created. Request: <code>{pending.request_id}</code></p></div><button className="secondary" onClick={() => { setSelected(DEVICE); setReleaseId(pending.release_id); setPage('Devices') }}>Review saved request</button></div>}
+        {pending && <div className="alert warning" role="alert"><div><strong>{armMessage}</strong><p>Request: <code>{pending.request_id}</code></p></div><button className="secondary" disabled={busy || authExpired} onClick={() => { setSelected(DEVICE); setReleaseId(pending.release_id); setPage('Devices'); setModal('deploy') }}>Review saved request</button></div>}
         {(page === 'Overview' || page === 'Devices') && <>
           <section className="stats-grid" aria-label="Device summary"><Stat label="Gateways" value={loaded ? gateways.length : '—'} icon={<Server size={21} />} online={onlineCount(gateways)} offline={gateways.length - onlineCount(gateways)} /><Stat label="Subdevices" value={loaded ? subdevices.length : '—'} icon={<Cpu size={21} />} online={onlineCount(subdevices)} offline={subdevices.length - onlineCount(subdevices)} /><Stat label="Approved releases" value={loaded ? data.releases.filter(r => r.status === 'approved').length : '—'} icon={<ShieldCheck size={21} />} detail="Ready for deployment" /><Stat label="Verified deployments" value={loaded ? data.deployments.filter(j => j.flash_verified && j.application_health_verified).length : '—'} icon={<Rocket size={21} />} detail="Flash + application confirmed" /></section>
           <div className="device-grid"><section className="panel inventory"><div className="panel-heading"><div><h2>Device fleet <span className="count-pill">{data.devices.length}</span></h2><p>Your connected hierarchy</p></div><Network size={20} /></div><div className="tree" aria-label="Device hierarchy">
             {!loaded && <p className="empty">Device observations will appear here.</p>}
-            {gateways.map(gateway => <div key={gateway.device_id}><DeviceButton name={gateway.device_id} kind="Gateway" selected={selected === gateway.device_id} online={connected(gateway, data.devices, now)} onClick={() => setSelected(gateway.device_id)} />{subdevices.filter(sub => sub.parent_id === gateway.device_id).map(sub => <div className="tree-child" key={sub.device_id}><DeviceButton name={sub.device_id} kind="Subdevice" selected={selected === sub.device_id} online={connected(sub, data.devices, now)} onClick={() => setSelected(sub.device_id)} /></div>)}</div>)}
+            {gateways.map(gateway => <div key={gateway.device_id}><DeviceButton name={gateway.device_id} kind="Gateway" disabled={busy || Boolean(pending) || authExpired} selected={selected === gateway.device_id} online={connected(gateway, data.devices, now)} onClick={() => setSelected(gateway.device_id)} />{subdevices.filter(sub => sub.parent_id === gateway.device_id).map(sub => <div className="tree-child" key={sub.device_id}><DeviceButton name={sub.device_id} kind="Subdevice" disabled={busy || Boolean(pending) || authExpired} selected={selected === sub.device_id} online={connected(sub, data.devices, now)} onClick={() => setSelected(sub.device_id)} /></div>)}</div>)}
           </div><div className="panel-foot"><Radio size={15} />Connectivity requires observations within 35s.</div></section>
           <section className="panel detail"><div className="panel-heading"><div className="device-title"><span className="device-icon"><Cpu size={25} /></span><div><span className="eyebrow">{device?.kind === 'gateway' ? 'GATEWAY' : 'SUBDEVICE'}</span><h2>{device?.device_id ?? 'Select a device'}</h2></div></div>{device && <Badge tone={connected(device, data.devices, now) ? 'green' : 'neutral'}>{connected(device, data.devices, now) ? 'Online' : 'Offline'}</Badge>}</div>
             {device ? <><dl className="detail-facts"><Fact label="Current firmware" value={device.firmware ? `v${device.firmware}` : 'Not reported'} /><Fact label="Operating state" value={<span className={`operating ${device.state === 'fault' ? 'fault' : ''}`}>{device.state ?? 'Not reported'}</span>} /><Fact label="Last observation" value={dateTime(device.last_seen)} /><Fact label="Update status" value={device.updating ? 'Updating' : 'Not updating'} /></dl><div className="detail-meta"><span>{device.parent_id ? <>Gateway <strong>{device.parent_id}</strong></> : 'Gateway connection'}</span><span>{!connected(device, data.devices, now) ? 'State and firmware are last known values.' : 'State comes from validated device observations.'}</span></div>
-              <div className="deploy-box"><div className="deploy-title"><Rocket size={18} /><h3>Deploy firmware</h3>{runtime.demo && <span className="mini-demo">SIMULATED</span>}</div><label htmlFor="release-select">Approved release</label><div className="deploy-controls"><select id="release-select" value={selectedRelease} disabled={busy || Boolean(pending) || authExpired} onChange={event => setReleaseId(event.target.value)}><option value="">Choose a release</option>{data.releases.filter(r => r.status === 'approved').map(r => <option key={r.release_id} value={r.release_id}>v{r.version} · {(r.size_bytes / 1024).toFixed(1)} KiB</option>)}</select><button disabled={busy || Boolean(blocked)} onClick={() => setModal('deploy')}><Rocket size={16} />{pending ? 'Review retry' : runtime.demo ? 'Simulate deploy' : 'Review deploy'}</button></div><p className="hint">{blocked ?? (pending ? 'Retry uses the saved request ID. Confirmation required.' : 'Approval checked. Confirm the target and version before sending.')}</p></div>
+              <div className="deploy-box"><div className="deploy-title"><Rocket size={18} /><h3>Deploy firmware</h3>{runtime.demo && <span className="mini-demo">SIMULATED</span>}</div><label htmlFor="release-select">Approved release</label><div className="deploy-controls"><select id="release-select" value={selectedRelease} disabled={busy || Boolean(pending) || authExpired} onChange={event => setReleaseId(event.target.value)}><option value="">Choose a release</option>{data.releases.filter(r => r.status === 'approved').map(r => <option key={r.release_id} value={r.release_id}>v{r.version} · {(r.size_bytes / 1024).toFixed(1)} KiB</option>)}</select><button disabled={busy || Boolean(blocked)} onClick={() => setModal('deploy')}><Rocket size={16} />{pending ? 'Review deployment' : runtime.demo ? 'Simulate deploy' : 'Review deploy'}</button></div><p className="hint">{blocked ?? (pending ? 'Keep this request ID. Arming and sending are separate actions.' : 'Review current and approved versions, arm for 120 seconds, then confirm and send.')}</p></div>
             </> : <p className="empty">Select a gateway or subdevice to inspect it.</p>}
           </section></div>
         </>}
@@ -167,15 +190,27 @@ export function Console({ runtime }: { runtime: Runtime }) {
       setModal(null)
       await action(signal => runtime.api.upload(body, signal), runtime.demo ? 'Demo binary added locally. Approval is the next step.' : 'Binary uploaded. Review and approve the release before deployment.')
     }} />}
-    {modal === 'deploy' && <Modal title={runtime.demo ? 'Confirm simulated deployment' : pending ? 'Confirm same-request retry' : 'Confirm deployment'} onClose={() => setModal(null)}><div className="confirmation-icon"><Rocket size={28} /></div><p>{runtime.demo ? 'This changes demo fixtures only. No cloud request or device command will be sent.' : pending ? 'The previous response was uncertain. This submits the exact saved request ID; the server will return an existing deployment rather than republish it.' : 'This sends a firmware installation command to the selected subdevice. There is no automatic retry or rollback.'}</p><dl className="confirm-facts"><Fact label="Target" value={DEVICE} /><Fact label="Gateway" value={GATEWAY} /><Fact label="Current version" value={device?.firmware ?? 'Unknown'} /><Fact label="Approved version" value={pending?.release_id ?? chosenRelease?.version ?? 'Unknown'} /></dl>{pending && <p className="request-id">Request <code>{pending.request_id}</code></p>}{blocked && <p className="alert error" role="alert">{blocked}</p>}<div className="modal-actions"><button className="secondary" onClick={() => setModal(null)}>Cancel</button><button disabled={Boolean(blocked) || busy} onClick={confirmDeploy}><Rocket size={16} />{runtime.demo ? 'Confirm simulation' : 'Confirm and send'}</button></div></Modal>}
+    {modal === 'deploy' && <Modal title={runtime.demo ? 'Review simulated deployment' : 'Review deployment'} onClose={() => setModal(null)}>
+      <div className="confirmation-icon"><Rocket size={28} /></div>
+      <p>{runtime.demo ? 'Demo fixtures only; no cloud requests or device commands. ' : ''}Review the target and versions before arming. An arm lasts 120 seconds and does not publish or install. Sending requires a separate confirmation; there are no POST retries.</p>
+      <dl className="confirm-facts"><Fact label="Target" value={DEVICE} /><Fact label="Gateway" value={GATEWAY} /><Fact label="Current version" value={device?.firmware ?? 'Unknown'} /><Fact label="Approved version" value={pending?.release_id ?? chosenRelease?.version ?? 'Unknown'} /></dl>
+      {pending && <><p className="request-id">Request <code>{pending.request_id}</code></p><p role="status">{armMessage}</p></>}
+      {pending?.stage === 'armed' && !canAbandon && pending.arm.from_version !== device?.firmware && <p role="alert">Current firmware changed since arming. Sending is locked; wait for expiry and review again.</p>}
+      {blocked && <p className="alert error" role="alert">{blocked}</p>}
+      <div className="modal-actions"><button className="secondary" onClick={() => setModal(null)}>Cancel</button>
+        {!pending && <button disabled={Boolean(blocked) || busy} onClick={armDeployment}>Arm this deployment</button>}
+        {canAbandon && <button disabled={busy || authExpired} onClick={abandonArm}>Abandon unused arm and review again</button>}
+        <button disabled={Boolean(blocked) || busy || !canSend} onClick={confirmDeploy}><Rocket size={16} />Confirm and send</button>
+      </div>
+    </Modal>}
   </div>
 }
 
 function Stat({ label, value, icon, online, offline, detail }: { label: string; value: number | string; icon: ReactNode; online?: number; offline?: number; detail?: string }) {
   return <article className="stat"><div className="stat-label">{label}<span>{icon}</span></div><strong className="stat-value">{value}</strong>{online !== undefined ? <div className="stat-status"><span><i className="status-dot" />{online} online</span><span><i className="status-dot offline-dot" />{offline} offline</span></div> : <p>{detail}</p>}</article>
 }
-function DeviceButton({ name, kind, selected, online, onClick }: { name: string; kind: string; selected: boolean; online: boolean; onClick: () => void }) {
-  return <button className={`device-row ${selected ? 'selected' : ''}`} onClick={onClick} aria-pressed={selected}>{kind === 'Gateway' ? <Server size={20} /> : <Cpu size={20} />}<span><strong>{name}</strong><small>{kind}</small></span><span className={`connectivity-dot ${online ? 'online' : ''}`} aria-label={online ? 'Online' : 'Offline'} /><ChevronRight size={15} /></button>
+function DeviceButton({ name, kind, selected, online, onClick, disabled }: { name: string; kind: string; selected: boolean; online: boolean; onClick: () => void; disabled: boolean }) {
+  return <button disabled={disabled} className={`device-row ${selected ? 'selected' : ''}`} onClick={onClick} aria-pressed={selected}>{kind === 'Gateway' ? <Server size={20} /> : <Cpu size={20} />}<span><strong>{name}</strong><small>{kind}</small></span><span className={`connectivity-dot ${online ? 'online' : ''}`} aria-label={online ? 'Online' : 'Offline'} /><ChevronRight size={15} /></button>
 }
 function Fact({ label, value }: { label: string; value: ReactNode }) { return <div className="fact"><dt>{label}</dt><dd>{value}</dd></div> }
 function Job({ job, demo }: { job: Deployment; demo: boolean }) {

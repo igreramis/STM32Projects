@@ -7,6 +7,8 @@
   "port": "/dev/serial0",
   "download_releases": {},
   "uart_monitor": true,
+  "install_enabled": false,
+  "require_deployment_arm": true,
   "signed_releases": {
     "public_key": "release-signing-public.pem",
     "key_id": "REPLACE_WITH_EXACT_KMS_KEY_ARN",

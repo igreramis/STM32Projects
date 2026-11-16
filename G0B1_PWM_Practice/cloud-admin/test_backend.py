@@ -85,6 +85,9 @@ class OfflineCase(unittest.TestCase):
 
     def setUp(self):
         # Fail loudly if a future test accidentally acquires a network transport.
+        enabled = patch.dict("os.environ", {"FIRMWARE_DEPLOYMENT_ENABLED": "true"})
+        enabled.start()
+        self.addCleanup(enabled.stop)
         for target in ("socket.socket", "socket.create_connection"):
             guard = patch(target, side_effect=AssertionError("network forbidden"))
             guard.start()
@@ -169,7 +172,7 @@ class OfflineCase(unittest.TestCase):
 class AuthBodyTests(OfflineCase):
     def test_preflight_is_empty_and_has_no_data_access(self):
         for path in ("/api/devices", "/api/releases", "/api/releases/0.2.0/approve",
-                     "/api/deployments"):
+                     "/api/deployments", "/api/deployment-arms", "/api/deployment-arms/" + REQUEST):
             event = self.event("OPTIONS", path)
             event["requestContext"].pop("authorizer")
             with patch.object(self.admin, "store") as store:
@@ -363,6 +366,7 @@ class UploadApprovalTests(OfflineCase):
 class DeploymentTests(OfflineCase):
     def test_success_durable_intent_before_one_publish_and_idempotent_replay(self):
         self.ready()
+        self.admin.arm(self.deployment())
         def publish(**kwargs):
             job = self.store.get("job", REQUEST)
             self.assertEqual((job["phase"], job["terminal"]), ("dispatch_unknown", False))
@@ -382,7 +386,7 @@ class DeploymentTests(OfflineCase):
         self.assertEqual((args["topic"], args["qos"]), ("lab/pi-lab-01/commands", 1))
         command = json.loads(args["payload"])
         self.assertEqual(set(command), {"command_id", "command", "version", "from_version", "sha256",
-                                        "expires_at", "url", "release"})
+                                        "expires_at", "url", "release", "deployment_arm"})
         self.assertEqual(command["expires_at"], NOW + 900)
         self.assertEqual(command["from_version"], "0.1.0")
         self.assertEqual(args["payload"], canonical(command))
@@ -395,14 +399,16 @@ class DeploymentTests(OfflineCase):
                     self.admin.deploy(self.deployment(request_id=request))
         for changes in ({"device_id": GATEWAY}, {"release_id": "01.2.0"}):
             self.fault("invalid_deployment", self.admin.deploy, self.deployment(**changes))
-        self.fault("release_not_approved", self.admin.deploy, self.deployment(), status=409)
+        self.fault("arm_required", self.admin.deploy, self.deployment(), status=409)
+        self.fault("release_not_approved", self.admin.arm, self.deployment(), status=409)
         self.admin.upload(self.upload_body())
-        self.fault("release_not_approved", self.admin.deploy, self.deployment(), status=409)
+        self.fault("release_not_approved", self.admin.arm, self.deployment(), status=409)
         self.iot.publish.assert_not_called()
         self.s3.generate_presigned_url.assert_not_called()
 
     def test_readiness_freshness_future_time_updating_and_firmware(self):
         self.ready()
+        self.admin.arm(self.deployment())
         good = self.store.get("observation", GATEWAY)
         self.store.rows.pop(("observation", GATEWAY))
         self.fault("device_not_ready", self.admin.deploy, self.deployment(), status=409)
@@ -415,7 +421,7 @@ class DeploymentTests(OfflineCase):
                 self.store.seed("observation", GATEWAY, row)
                 self.fault("device_not_ready", self.admin.deploy, self.deployment(), status=409)
         self.store.seed("observation", GATEWAY, dict(good, sub=dict(good["sub"], firmware="0.2.0")))
-        self.fault("same_version", self.admin.deploy, self.deployment(), status=409)
+        self.fault("arm_mismatch", self.admin.deploy, self.deployment(), status=409)
         self.iot.publish.assert_not_called()
         self.s3.generate_presigned_url.assert_not_called()
         self.store.seed("observation", GATEWAY, dict(good, seen=NOW - 35,
@@ -424,6 +430,8 @@ class DeploymentTests(OfflineCase):
 
     def test_request_reuse_and_active_lease_prevent_publish(self):
         self.ready()
+        self.admin.arm(self.deployment())
+        self.admin.arm(self.deployment(request_id=OTHER_REQUEST))
         self.admin.deploy(self.deployment())
         self.fault("request_id_reused", self.admin.deploy, self.deployment(release_id="0.3.0"), status=409)
         self.fault("deployment_conflict", self.admin.deploy, self.deployment(request_id=OTHER_REQUEST), status=409)
@@ -437,6 +445,7 @@ class DeploymentTests(OfflineCase):
                 self.store = MemoryStore()
                 self.admin.store = self.store
                 self.ready()
+                self.admin.arm(self.deployment())
                 def race(changes):
                     row = self.store.get(kind, identifier)
                     self.store.seed(kind, identifier, row)
@@ -449,6 +458,7 @@ class DeploymentTests(OfflineCase):
 
     def test_concurrent_same_request_returns_winner_without_publish(self):
         self.ready()
+        self.admin.arm(self.deployment())
         def winner(changes):
             self.store.commit(changes)
         self.store.before_commit = winner
@@ -459,6 +469,7 @@ class DeploymentTests(OfflineCase):
 
     def test_ambiguous_publish_is_never_retried_and_lease_does_not_expire(self):
         self.ready()
+        self.admin.arm(self.deployment())
         self.iot.publish.side_effect = TimeoutError("untrusted-detail")
         first = self.admin.deploy(self.deployment())
         self.assertEqual((first["status"], first["error"]), ("error", "dispatch_unknown"))
@@ -474,6 +485,7 @@ class DeploymentTests(OfflineCase):
 
     def test_preparation_failure_releases_lease_without_publish_or_retry(self):
         self.ready()
+        self.admin.arm(self.deployment())
         self.s3.generate_presigned_url.side_effect = RuntimeError("untrusted-detail")
         result = self.admin.deploy(self.deployment())
         self.assertEqual(result["error"], "dispatch_preparation_failed")
@@ -485,6 +497,7 @@ class DeploymentTests(OfflineCase):
 
     def test_oversize_command_releases_lease_without_publish(self):
         self.ready()
+        self.admin.arm(self.deployment())
         self.s3.generate_presigned_url.return_value = "x" * 8192
         result = self.admin.deploy(self.deployment())
         self.assertEqual(result["error"], "command_too_large")
@@ -494,6 +507,7 @@ class DeploymentTests(OfflineCase):
 
     def test_ack_during_publish_wins_over_dispatch_result(self):
         self.ready()
+        self.admin.arm(self.deployment())
         self.iot.publish.side_effect = lambda **kwargs: self.accepted(self.ack())
         self.assertEqual(self.admin.deploy(self.deployment())["phase"], "accepted")
         self.assertEqual(self.store.get("job", REQUEST)["event_seq"], 1)
@@ -501,6 +515,7 @@ class DeploymentTests(OfflineCase):
 
     def test_ack_racing_dispatched_commit_wins_without_republish(self):
         self.ready()
+        self.admin.arm(self.deployment())
         def published(**kwargs):
             self.store.before_commit = lambda changes: self.accepted(self.ack())
         self.iot.publish.side_effect = published
@@ -802,6 +817,7 @@ class AckTests(OfflineCase):
     def setUp(self):
         super().setUp()
         self.ready()
+        self.admin.arm(self.deployment())
         self.admin.deploy(self.deployment())
 
     def test_duplicate_out_of_order_unknown_and_wrong_version_are_noops(self):
@@ -929,6 +945,7 @@ class GatewayCompatibilityTests(OfflineCase):
         self.approved()
         self.monitor.feed(b"Hello from NUCLEO-G0B1RE! firmware=0.1.0\r\n")
         self.accepted(self.produced(1))
+        self.admin.arm(self.deployment())
         self.assertEqual(self.admin.deploy(self.deployment())["status"], "dispatched")
         self.iot.publish.assert_called_once()
 
@@ -981,6 +998,7 @@ class GatewayCompatibilityTests(OfflineCase):
 
     def test_actual_gateway_command_parser_and_ack_progress_to_success(self):
         self.ready()
+        self.admin.arm(self.deployment())
         self.admin.deploy(self.deployment())
         payload = self.iot.publish.call_args.kwargs["payload"]
         command = self.client.parse_command_object(payload)
@@ -1000,6 +1018,7 @@ class GatewayCompatibilityTests(OfflineCase):
 
     def test_actual_gateway_error_ack_and_transient_rejection(self):
         self.ready()
+        self.admin.arm(self.deployment())
         self.admin.deploy(self.deployment())
         jobs = self.coordinator()
         self.rejected(self.envelope("ack", jobs._reject(REQUEST, "command_expired")))

@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import signed_release
+from deployment_arm import DeploymentArmVerifier, ISSUED_SKEW_SECONDS
 
 
 VERSIONS = ("0.1.0", "0.2.0", "0.3.0")
@@ -43,7 +44,7 @@ _ERRORS = frozenset((
     "application_start_timeout", "cancelled", "command_expired",
     "image_validation_failed", "download_not_approved", "download_failed",
     "download_validation_failed", "download_deadline_exceeded", "internal_error",
-    "interrupted", "installer_busy", "storage_error",
+    "interrupted", "installer_busy", "storage_error", "deployment_arm_expired",
 ))
 _FLAGS = ("flash_verified", "flash_may_be_modified", "application_health_verified")
 _RECORD_KEYS = {
@@ -83,19 +84,26 @@ def _safe_id(value):
 class OtaJobs:
     """installer(command, progress, stop_event) -> dict; no worker until submit.
 
-    Invalid/expired, conflicting, closed, unhealthy and capacity rejections are
+    Invalid/legacy-expired, conflicting, closed, unhealthy and capacity rejections are
     transient (event_seq=None); do not acknowledge them in the durable journal.
-    Busy rejections ARE durable when capacity permits. Duplicate requests are
+    Busy and authentic arm-expired rejections ARE durable when capacity permits.
+    Duplicate requests are
     looked up before expiry so a late redelivery can retrieve its tombstone.
     """
 
-    def __init__(self, client_id, state_root, installer, clock=time.time):
+    def __init__(self, client_id, state_root, installer, clock=time.time, *,
+                 deployment_arm_verifier=None, require_deployment_arm=False):
         if (type(client_id) is not str or
                 re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", client_id) is None or
-                not callable(installer) or not callable(clock)):
+                not callable(installer) or not callable(clock) or
+                type(require_deployment_arm) is not bool or
+                (deployment_arm_verifier is not None and not callable(deployment_arm_verifier)) or
+                (require_deployment_arm and deployment_arm_verifier is None)):
             raise ValueError("invalid_ota_configuration")
         self.client_id = client_id
         self.install_enabled = True
+        self.deployment_arm_verifier = deployment_arm_verifier
+        self.require_deployment_arm = require_deployment_arm
         self.installer = installer
         self.clock = clock
         self.stop_event = threading.Event()  # Never the gateway's transport event.
@@ -225,7 +233,8 @@ class OtaJobs:
             raise ValueError
         command = dict(value)
         dynamic = "release" in command
-        if (set(command) not in (_REQUIRED, _REQUIRED | {"url"}, _REQUIRED | {"url", "release"}) or
+        if (set(command) not in (_REQUIRED, _REQUIRED | {"url"}, _REQUIRED | {"url", "release"},
+                    _REQUIRED | {"url", "release", "deployment_arm"}) or
                 _safe_id(command.get("command_id")) is None or
                 command.get("command") != "install_firmware" or
                     not (signed_release.version(command.get("version")) if dynamic else command.get("version") in VERSIONS) or
@@ -264,26 +273,43 @@ class OtaJobs:
                 return self._reject(command_id, "coordinator_closed")
             if not self.install_enabled:
                 return self._reject(command_id, "deployment_disabled")
+            permit = None
+            if "deployment_arm" in command or self.require_deployment_arm:
+                if "deployment_arm" not in command or self.deployment_arm_verifier is None:
+                    return self._reject(command_id, "invalid_deployment_arm")
+                try:
+                    permit = self.deployment_arm_verifier(command)
+                except Exception:
+                    return self._reject(command_id, "invalid_deployment_arm")
+            # Read time AFTER crypto verification; never admit against a stale clock sample.
             now = self.clock()
-            if not math.isfinite(now) or not now < command["expires_at"] <= now + 1800:
+            rejection = None
+            if permit is not None:
+                if not math.isfinite(now) or permit["issued_at"] > now + ISSUED_SKEW_SECONDS:
+                    return self._reject(command_id, "invalid_deployment_arm")
+                if now >= permit["arm_expires_at"]:
+                    rejection = "deployment_arm_expired"
+            if rejection is None and (not math.isfinite(now) or not now < command["expires_at"] <= now + 1800):
                 return self._reject(command_id, "command_expired")
             if len(self._records) >= MAX_RECORDS:
                 return self._reject(command_id, "state_capacity_exceeded")
             busy = self._worker is not None and self._worker.is_alive()
+            if rejection is None and busy:
+                rejection = "installer_busy"
             record = dict(fingerprint=fingerprint, command_id=command_id,
                           version=command["version"], device_id=self.client_id,
-                          status="rejected" if busy else "accepted",
-                          phase="rejected" if busy else "accepted", flashed=False,
+                          status="rejected" if rejection else "accepted",
+                          phase="rejected" if rejection else "accepted", flashed=False,
                           flash_verified=False, flash_may_be_modified=False,
                           application_health_verified=False, delivery_seq=1, acked_seq=0)
-            if busy:
-                record["error"] = "installer_busy"
+            if rejection:
+                record["error"] = rejection
             try:
                 self._commit(record)  # Must finish before Thread.start().
             except StorageError:
                 return self._reject(command_id, "storage_error")
             response = self._snapshot(record)
-            if not busy:
+            if rejection is None:
                 self._current_id = command_id
                 # Hash the original request, but match Installer's lowercase SHA API.
                 command["sha256"] = command["sha256"].lower()
@@ -434,6 +460,9 @@ class OtaJobs:
         Optional ``uart_monitor: true`` enables the receive-only monitor inside
         this same client/service process; default is disabled. Stop external
         UART monitors before enabling. No service or live config is rewritten.
+        Optional ``require_deployment_arm`` is a strict boolean, default false;
+        true requires signed_releases. Supplied permits are always verified.
+        install_enabled remains the independent emergency admission master.
         Signed operation requires the optional cryptography dependency locally.
         """
         if path is None:
@@ -443,7 +472,8 @@ class OtaJobs:
             config = json.loads(config_path.read_text(encoding="utf-8"),
                                 object_pairs_hook=_unique_object)
             required = {"catalog", "release_root", "baseline", "run_root", "state_root", "port"}
-            optional = {"download_releases", "signed_releases", "uart_monitor", "install_enabled"}
+            optional = {"download_releases", "signed_releases", "uart_monitor", "install_enabled",
+                        "require_deployment_arm"}
             if type(config) is not dict or not required <= set(config) or set(config) - required - optional:
                 raise ValueError
 
@@ -459,12 +489,17 @@ class OtaJobs:
                 raise ValueError
             kwargs["download_releases"] = {key: resolve(value) for key, value in downloads.items()}
             signing = config.get("signed_releases")
+            require_arm = config.get("require_deployment_arm", False)
+            if type(require_arm) is not bool or (require_arm and signing is None):
+                raise ValueError
+            arm_verifier = None
             if "signed_releases" in config:
                 if (type(signing) is not dict or set(signing) != {"public_key", "key_id", "bucket", "region", "seed_version"} or
                         signing["seed_version"] not in ("original",) + VERSIONS):
                     raise ValueError
                 kwargs["verifier"] = signed_release.ReleaseVerifier(resolve(signing["public_key"]),
                     signing["key_id"], signing["bucket"], signing["region"])
+                arm_verifier = DeploymentArmVerifier(kwargs["verifier"], client_id)
                 from verified_state import VerifiedState
                 kwargs["predecessor_state"] = VerifiedState(Path(kwargs["state_root"]) / "verified-flash", signing["seed_version"])
             monitor_enabled = config.get("uart_monitor", False)
@@ -481,7 +516,8 @@ class OtaJobs:
             from uart_state import StateMonitor, MonitoredInstaller
             monitor = StateMonitor(kwargs["port"])
             installer = MonitoredInstaller(installer, monitor)
-        jobs = cls(client_id, state_root, installer)
+        jobs = cls(client_id, state_root, installer, deployment_arm_verifier=arm_verifier,
+               require_deployment_arm=require_arm)
         jobs.install_enabled = install_enabled
         jobs.monitor = monitor
         return jobs

@@ -1,4 +1,4 @@
-import type { AdminApi, Snapshot } from '../domain'
+import type { AdminApi, Arm, Intent, Snapshot } from '../domain'
 import type { Runtime } from '../auth'
 import { vi } from 'vitest'
 
@@ -16,12 +16,19 @@ export function snapshot(): Snapshot {
   }
 }
 export function testApi(data = snapshot()): AdminApi {
+  let saved: Arm | undefined
   return {
     snapshot: vi.fn(async () => structuredClone(data)),
     upload: vi.fn(async () => data.releases[1]),
     approve: vi.fn(async () => ({ ...data.releases[1], status: 'approved' as const })),
+    arm: vi.fn(async body => { saved = armFixture(body); return saved }),
+    armStatus: vi.fn(async () => { if (!saved) throw new Error('not found'); return saved }),
     deploy: vi.fn(async body => ({ command_id: body.request_id, device_id: body.device_id, version: body.release_id, from_version: '0.4.0', status: 'dispatched', phase: 'dispatched', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), flash_verified: false, application_health_verified: false })),
   }
+}
+export function armFixture(body: Intent): Arm {
+  const now = Date.now()
+  return { ...body, from_version: '0.4.0', armed_at: new Date(now).toISOString(), expires_at: new Date(now + 120000).toISOString(), status: 'armed' }
 }
 export function runtime(api = testApi(), demo = false): Runtime {
   return { demo, api, authenticated: true, storageKey: demo ? 'test-demo' : 'test-live', login: vi.fn(async () => {}), logout: vi.fn(async () => {}) }

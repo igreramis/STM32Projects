@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { deploymentSchema, deviceSchema, releaseSchema } from './domain'
+import { armSchema, deploymentSchema, deviceSchema, releaseSchema } from './domain'
 import type { AdminApi } from './domain'
 
 const messages: Record<string, string> = {
@@ -11,6 +11,12 @@ const messages: Record<string, string> = {
   deployment_conflict: 'Another deployment is active or requires investigation.', conflict: 'The data changed. Refresh and review before continuing.',
   release_integrity_failed: 'Release integrity validation failed. Approval was not completed.', release_not_found: 'The release is no longer available.',
   request_id_reused: 'This request belongs to another deployment. Investigation is required.',
+  arm_required: 'Review and arm this deployment before sending.',
+  arm_not_found: 'The arm could not be found. Keep this request and reconcile; do not send a new request.',
+  arm_expired: 'The arm has expired. Reconcile before reviewing another arm.',
+  arm_consumed: 'This arm has already been used. Reconcile deployment history.',
+  arm_mismatch: 'The arm no longer matches this deployment. Refresh and review.',
+  arm_conflict: 'Another arm exists or this request cannot be reused. Reconcile before continuing.',
 }
 export class ApiError extends Error {
   readonly uncertain: boolean
@@ -64,6 +70,8 @@ export function realApi(baseUrl: string, token: () => Promise<string>): AdminApi
     },
     upload: (body, signal) => request('releases', releaseSchema, signal, body),
     approve: (id, signal) => request(`releases/${encodeURIComponent(id)}/approve`, releaseSchema, signal, {}),
+    arm: (body, signal) => request('deployment-arms', armSchema, signal, body),
+    armStatus: (id, signal) => request(`deployment-arms/${encodeURIComponent(id)}`, armSchema, signal),
     deploy: (body, signal) => request('deployments', deploymentSchema, signal, body),
   }
 }

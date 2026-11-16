@@ -49,7 +49,7 @@ class DynamoStore:
                 revision = before["_revision"] + 1
                 common.update(ConditionExpression="revision = :revision",
                               ExpressionAttributeValues={":revision": {"N": str(before["_revision"])}})
-            if after is before and before is not None:
+            if after is before:
                 common["Key"] = self.key(kind, identifier)
                 operations.append({"ConditionCheck": common})
             elif after is None:

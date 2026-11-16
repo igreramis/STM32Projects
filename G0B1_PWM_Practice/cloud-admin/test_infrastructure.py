@@ -449,9 +449,9 @@ class SmokeSafetyTests(unittest.TestCase):
         for parameter in ("false", None):
             with self.subTest(parameter=parameter):
                 posts = self.run_smoke(parameter, "false")
-                self.assertEqual(len(posts), 1)
-                self.assertEqual(posts[0]["rawPath"], "/api/deployments")
-                self.assertEqual(posts[0]["body"], "{}")
+                self.assertEqual([post["rawPath"] for post in posts],
+                                 ["/api/deployment-arms", "/api/deployments"])
+                self.assertTrue(all(post["body"] == "{}" for post in posts))
 
 
 if __name__ == "__main__":

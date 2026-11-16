@@ -93,6 +93,13 @@ class DynamoStoreTests(unittest.TestCase):
         self.assertIn("Put", operation)
         self.assertEqual(operation["Put"]["Item"]["revision"], {"N": "3"})
 
+    def test_absent_job_and_lease_are_condition_checks_not_deletes(self):
+        self.store.commit([("job", "request", None, None), ("lease", "gateway", None, None)])
+        operations = self.client.transact_write_items.call_args.kwargs["TransactItems"]
+        for operation, kind, identifier in zip(operations, ("job", "lease"), ("request", "gateway")):
+            self.assertEqual(operation, {"ConditionCheck": {"TableName": "offline-table",
+                "ConditionExpression": "attribute_not_exists(pk)", "Key": self.store.key(kind, identifier)}})
+
     def test_conditional_cancellation_maps_to_conflict_without_retry(self):
         self.client.transact_write_items.side_effect = ServiceError({
             "Error": {"Code": "TransactionCanceledException"},

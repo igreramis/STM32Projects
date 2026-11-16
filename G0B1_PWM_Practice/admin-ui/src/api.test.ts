@@ -2,9 +2,35 @@ import { describe, expect, it, vi } from 'vitest'
 import { ApiError, realApi } from './api'
 import { createRuntime, oidcSettings } from './auth'
 import { DEVICE } from './domain'
-import { snapshot } from './test/fixtures'
+import { armFixture, snapshot } from './test/fixtures'
 
 describe('real API and auth boundaries', () => {
+  it('POSTs the exact arm intent, then GETs its UUID without retrying either request', async () => {
+    const intent = { device_id: DEVICE, release_id: '0.5.0', request_id: crypto.randomUUID() } as const
+    const arm = armFixture(intent)
+    vi.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify(arm)))
+    const api = realApi('https://api.example.test/', async () => 'test')
+    const signal = new AbortController().signal
+    expect(await api.arm(intent, signal)).toEqual(arm)
+    expect(await api.armStatus(intent.request_id, signal)).toEqual(arm)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(fetch).mock.calls[0]).toMatchObject(['https://api.example.test/api/deployment-arms', { method: 'POST', body: JSON.stringify(intent) }])
+    expect(vi.mocked(fetch).mock.calls[1]).toMatchObject([`https://api.example.test/api/deployment-arms/${intent.request_id}`, { method: 'GET' }])
+    expect(vi.mocked(fetch).mock.calls[1][1]?.body).toBeUndefined()
+  })
+  it.each(['expires_at', 'device_id', 'request_id', 'status', 'from_version', 'armed_at'])('rejects an invalid arm %s as uncertain', async field => {
+    const intent = { device_id: DEVICE, release_id: '0.5.0', request_id: crypto.randomUUID() } as const
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ ...armFixture(intent), [field]: 'invalid' })))
+    const api = realApi('https://api.example.test', async () => 'test')
+    await expect(api.arm(intent, new AbortController().signal)).rejects.toMatchObject({ uncertain: true })
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+  it('sanitizes unknown arm errors and does not retry a failed arm POST', async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ error: 'secret=https://private.example' }), { status: 503 }))
+    const api = realApi('https://api.example.test', async () => 'test')
+    await expect(api.arm({ device_id: DEVICE, release_id: '0.5.0', request_id: crypto.randomUUID() }, new AbortController().signal)).rejects.toThrow('The service could not complete this request.')
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
   it('uses access-token authorization and exact API routes', async () => {
     const data = snapshot()
     vi.mocked(fetch).mockImplementation(async input => {
@@ -61,7 +87,10 @@ describe('explicit demo boundary', () => {
     await app.api.snapshot(signal)
     await app.api.upload({ version: '0.7.0', filename: 'f.bin', content_base64: btoa('fixture!') }, signal)
     await app.api.approve('0.7.0', signal)
-    const job = await app.api.deploy({ device_id: DEVICE, release_id: '0.7.0', request_id: crypto.randomUUID() }, signal)
+    const intent = { device_id: DEVICE, release_id: '0.7.0', request_id: crypto.randomUUID() } as const
+    await app.api.arm(intent, signal)
+    await app.api.armStatus(intent.request_id, signal)
+    const job = await app.api.deploy(intent, signal)
     expect(job.version).toBe('0.7.0')
     expect(fetch).not.toHaveBeenCalled()
     expect(localStorage.length).toBe(0)

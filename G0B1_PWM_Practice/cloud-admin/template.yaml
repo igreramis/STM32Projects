@@ -25,7 +25,7 @@ Parameters:
     Type: String
     Default: 'false'
     AllowedValues: ['false', 'true']
-    Description: Enable HTTP firmware command publishing only for supervised installation.
+    Description: Emergency master gate for arming and deployment; true still requires a single-use 120-second arm.
   WebOrigin:
     Type: String
     Default: http://localhost:5173
@@ -75,7 +75,7 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      Description: Admin MVP immutable firmware release signing key
+      Description: Admin MVP immutable firmware release and deployment permit signing key
       KeySpec: RSA_2048
       KeyUsage: SIGN_VERIFY
       KeyPolicy:
@@ -203,6 +203,7 @@ Resources:
                 Resource:
                   Fn::Sub: arn:${AWS::Partition}:s3:::${FirmwareBucket}/firmware/stm32g0b1/*
               - Sid: SignReleasesOnly
+                # Same pinned signer/algorithm for approved releases and bound deployment permits.
                 Effect: Allow
                 Action: kms:Sign
                 Resource:
@@ -465,7 +466,7 @@ Resources:
 
 Outputs:
   ApiUrl:
-    Description: API base URL; append /api/devices, /api/releases, or /api/deployments.
+    Description: API base URL; append /api/devices, /api/releases, /api/deployment-arms, or /api/deployments.
     Value:
       Fn::GetAtt: [HttpApi, ApiEndpoint]
   CognitoIssuer:

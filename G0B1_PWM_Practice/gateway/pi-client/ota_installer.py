@@ -249,7 +249,8 @@ class Installer:
     def _command(command):
         required = {"command_id", "command", "version", "from_version", "sha256", "expires_at"}
         dynamic = type(command) is dict and "release" in command
-        if (type(command) is not dict or set(command) not in (required, required | {"url"}, required | {"url", "release"}) or
+        if (type(command) is not dict or set(command) not in (required, required | {"url"},
+            required | {"url", "release"}, required | {"url", "release", "deployment_arm"}) or
                 command.get("command") != "install_firmware" or
                 not isinstance(command.get("command_id"), str) or
                 re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", command["command_id"]) is None or

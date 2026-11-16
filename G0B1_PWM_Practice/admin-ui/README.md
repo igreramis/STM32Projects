@@ -7,7 +7,12 @@ external fonts, analytics, automatic deployment, or automatic rollback.
 **Live UI:** https://dw4cy96r64rff.cloudfront.net/
 See [hosting](../docs/ADMIN-FRONTEND-HOSTING.md) and the
 [deployment record](../docs/ADMIN-BACKEND-DEPLOYMENT.md) for operational evidence.
-Firmware installation remains disabled in cloud and gateway configuration.
+This frontend does not alter cloud or gateway installation configuration.
+
+**Current rollout:** [single-use authorization deployment](../docs/ADMIN-SINGLE-USE-ARM-DEPLOYMENT.md).
+The new UI/backend/Pi policy is live: 79 UI tests/build/lint passed; authenticated
+browser telemetry reports 0.4.0 idle. No new firmware install was initiated by
+this rollout. The historical validation notes below predate it.
 
 ## Local development and demo
 
@@ -66,20 +71,48 @@ with Cognito or change deployed CORS.
   and embedded version; the server remains authoritative. Upload never approves
   or deploys automatically. An uncertain upload may reserve a version: do not
   blindly retry.
-- Deployment confirmation requires the sole target, an approved release, fresh
+- Deployment review requires the sole target, an approved release, fresh
   gateway/subdevice, reported firmware and no updating/active job. Preconditions
-  are rechecked on confirmation. These UI gates do not override cloud disablement.
-- A UUID is persisted before deployment POST. Uncertain results retain the exact
-  target/release/request tuple across reload and same-tab reauthentication,
-  scoped to API/client/user. Explicit confirmed retries reuse that UUID; no
-  automatic POST retry or ambiguous republish. History reconciles pending work;
-  corrupt/unavailable persistence fails closed.
+  are rechecked on both explicit actions: **Arm this deployment**, then separately
+  **Confirm and send**. Review displays the target, current and approved versions.
+  Arming lasts 120 seconds and does not publish or install firmware. The UI shows
+  a live countdown, blocks expired arms, and checks current firmware still matches
+  the arm. These UI gates do not override backend readiness checks.
+- A UUID is persisted **before arm POST**, with a stage distinguishing arm pending,
+  armed and deployment pending. Deployment POST uses the exact same intent.
+  No POST is retried, automatically or manually. Uncertain results retain their
+  identity across reload and same-tab reauthentication, scoped to API/client/user.
+  Reload requires a read-only arm lookup before sending; legacy bare saved intents
+  are treated as uncertain deployments, never as fresh arms. Corrupt/unavailable
+  persistence fails closed.
+- Arm uncertainty is reconciled through GET; deployment uncertainty only through
+  deployment history. Missing arm/history records do not authorize a new UUID.
+  Only a known unused expired arm may be explicitly abandoned, followed by a new
+  review and explicit arm click with a fresh UUID. Any attempted dispatch stays
+  locked until history reconciles it, even if its arm subsequently expires.
+- After sending, follow physical prompts in Pi journal. No SSH actions, gateway
+  toggles, or hardware button instructions are provided by this dashboard.
 - `dispatch_unknown` remains blocking even with visible `error` status. Progress
   uses reported stages, not elapsed time; flash/application verification remain
   distinct and are never inferred from dispatch.
 - Onboarding and Telemetry tabs are intentionally disabled, including on mobile.
 
 ## Validation and limits
+
+### Arm API contract
+
+- `arm(body: Intent, signal)` → `POST /api/deployment-arms`
+- `armStatus(requestId, signal)` → `GET /api/deployment-arms/<uuid>`
+- `Intent = { device_id: 'stm32g0b1-01', release_id: numeric semver, request_id: UUID }`
+- Both arm endpoints return `Arm = { ...Intent, from_version: numeric semver,
+  armed_at: ISO UTC, expires_at: ISO UTC, status: 'armed' | 'consumed' | 'expired' }`.
+  Expiry is 120 seconds after arming; the same UUID never renews it.
+- `POST /api/deployments` keeps its existing Intent body and requires the matching
+  prior arm. API error messages are allowlisted; unknown errors remain generic.
+- Demo implements the same matching, expiry, no-renewal and consumption semantics
+  entirely in memory. Reload resets demo fixtures, not pending safety records;
+  a missing demo arm after reload therefore remains locked, just like a missing
+  live arm. No live API calls are made.
 
 Vitest/Testing Library tests are offline; unexpected fetches reject by default.
 Prior recorded evidence: **47 UI tests, build and lint passed**. Hosted authenticated

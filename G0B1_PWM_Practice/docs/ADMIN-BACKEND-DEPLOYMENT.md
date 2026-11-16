@@ -1,5 +1,9 @@
 # Backend deployment — 2026-11-16
 
+**Historical record:** current artifact, gateway state and enabled single-use-arm
+mode are documented in [the latest rollout](ADMIN-SINGLE-USE-ARM-DEPLOYMENT.md).
+The supervised 0.4.0 hardware result is in [the trial](ADMIN-OTA-040-TRIAL.md).
+
 This record includes the final local suite and live checks after HTTPS hosting
 and the telemetry clock fix. Historical Pi checks are identified separately.
 

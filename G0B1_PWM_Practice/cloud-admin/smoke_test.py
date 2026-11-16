@@ -44,7 +44,8 @@ def main():
             assert "FunctionError" not in result, "Lambda runtime failure"
             return json.loads(path.read_text())
 
-    for path in ("/api/devices", "/api/releases", "/api/deployments"):
+    for path in ("/api/devices", "/api/releases", "/api/deployments", "/api/deployment-arms",
+                 "/api/deployment-arms/00000000-0000-4000-8000-000000000000"):
         for method in ("GET", "POST"):
             request = urllib.request.Request(outputs["ApiUrl"] + path, method="OPTIONS", headers={
                 "Origin": origin,
@@ -97,15 +98,16 @@ def main():
     # Older stacks have no parameter, but still have the runtime safety gate.
     if (deployment_state == "false" and
             parameters.get("FirmwareDeploymentEnabled", "false") == "false"):
-        response = invoke("HttpFunctionName", {
-            "requestContext": {"http": {"method": "POST"},
-                               "authorizer": {"jwt": {"claims": claims}}},
-            "rawPath": "/api/deployments", "body": "{}"})
-        assert response["statusCode"] == 403
-        assert json.loads(response["body"]) == {"error": "deployment_disabled"}
-        print("PASS firmware deployment disabled before effects")
+        for path in ("/api/deployment-arms", "/api/deployments"):
+            response = invoke("HttpFunctionName", {
+                "requestContext": {"http": {"method": "POST"},
+                                   "authorizer": {"jwt": {"claims": claims}}},
+                "rawPath": path, "body": "{}"})
+            assert response["statusCode"] == 403
+            assert json.loads(response["body"]) == {"error": "deployment_disabled"}
+        print("PASS firmware arming and deployment disabled before effects")
     else:
-        print("SKIP deployment POST: deployment is enabled or disablement is unconfirmed")
+        print("SKIP arm/deployment POST: deployment is enabled or disablement is unconfirmed")
 
     assert invoke("IngestFunctionName", {"ingest_type": "invalid"}) == {
         "ok": False, "error": "event_rejected"}

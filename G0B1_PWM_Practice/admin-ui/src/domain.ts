@@ -25,11 +25,19 @@ export type Deployment = z.infer<typeof deploymentSchema>
 export type Snapshot = { devices: Device[]; releases: Release[]; deployments: Deployment[] }
 export const intentSchema = z.object({ device_id: z.literal(DEVICE), release_id: version, request_id: z.uuid() })
 export type Intent = z.infer<typeof intentSchema>
+const utcDate = date.refine(value => /(?:Z|\+00:00)$/.test(value))
+export const armSchema = intentSchema.extend({
+  from_version: version, armed_at: utcDate, expires_at: utcDate,
+  status: z.enum(['armed', 'consumed', 'expired']),
+}).refine(arm => Date.parse(arm.expires_at) - Date.parse(arm.armed_at) === 120000)
+export type Arm = z.infer<typeof armSchema>
 export type Upload = { version: string; filename: string; content_base64: string }
 export interface AdminApi {
   snapshot(signal: AbortSignal): Promise<Snapshot>
   upload(body: Upload, signal: AbortSignal): Promise<Release>
   approve(id: string, signal: AbortSignal): Promise<Release>
+  arm(body: Intent, signal: AbortSignal): Promise<Arm>
+  armStatus(requestId: string, signal: AbortSignal): Promise<Arm>
   deploy(body: Intent, signal: AbortSignal): Promise<Deployment>
 }
 

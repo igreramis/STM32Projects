@@ -10,6 +10,8 @@ import ota_jobs
 import rom_program
 import uart_state
 import verified_state
+from deployment_arm import DeploymentArmVerifier
+from test_deployment_arm import arm_payload, REQUEST
 from test_ota_installer import InstallerFixture, WorkerRom, line
 from test_signed_release import key_fixture, payload, envelope, url
 
@@ -72,6 +74,45 @@ class DynamicTests(InstallerFixture):
         self.assertEqual(persisted["version"], "12.34.56")
         self.assertEqual(persisted["flash_sha256"], rom_program.sha256(self.full_flash(self.image)))
         self.assertEqual(self.catalog_path.read_bytes(), catalog_before)
+
+    def armed_worker(self, advance_at, elapsed):
+        self.command.update(command_id=REQUEST, expires_at=1900)
+        self.command["deployment_arm"] = envelope(self.key, arm_payload(self.command, issued=1000))
+        jobs = ota_jobs.OtaJobs("pi-lab-01", self.root / "jobs", self.installer,
+            clock=self.installer.wall_clock,
+            deployment_arm_verifier=DeploymentArmVerifier(self.installer.verifier, "pi-lab-01"),
+            require_deployment_arm=True)
+        self.addCleanup(jobs.close)
+        progress = jobs._progress
+
+        def report(command_id, stage, **details):
+            self.progress(stage, **details)
+            if stage == advance_at:
+                self.clock.now = elapsed
+            progress(command_id, stage, **details)
+
+        with patch.object(jobs, "_progress", side_effect=report):
+            accepted = jobs.submit(self.command)
+            self.assertEqual(accepted["status"], "accepted")
+            jobs._worker.join()
+        return jobs.pending_results()[0]
+
+    def test_arm_expiry_during_backup_does_not_interrupt_accepted_install(self):
+        self.clock.now = 119.9  # Admit just before the exclusive 120-second deadline.
+        result = self.armed_worker("backing_up", 121)
+        self.assertEqual(result["status"], "application_verified", result)
+        self.assertEqual(self.rom.commands.count(0x44), 1)
+        self.assertEqual(bytes(self.rom.memory), self.full_flash(self.image))
+
+    def test_command_expiry_still_checked_after_backup_before_erase(self):
+        result = self.armed_worker("backup_saved", 900)
+        self.assertEqual(result["error"], "command_expired")
+        self.assertNotIn(0x44, self.rom.commands)
+
+    def test_expiry_after_erase_does_not_abandon_programming(self):
+        result = self.armed_worker("programming", 901)
+        self.assertEqual(result["status"], "application_verified", result)
+        self.assertEqual(self.rom.commands.count(0x44), 1)
 
     def test_invalid_signature_before_download_or_serial(self):
         self.command["release"]["signature"] = "a" * 344

@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import ota_jobs
+import client
 import uart_state
 from test_signed_release import KEY_ID, key_fixture
 
@@ -35,6 +36,43 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIsNone(jobs.monitor)
         self.assertIsNone(jobs.installer.verifier)
         self.assertIsNone(jobs.installer.predecessor_state)
+        self.assertFalse(jobs.require_deployment_arm)
+        self.assertIsNone(jobs.deployment_arm_verifier)
+
+    def test_arm_flag_requires_strict_bool_and_signer(self):
+        for value in (None, 0, 1, "true", [], {}):
+            self.config.update(require_deployment_arm=value, signed_releases=self.signing())
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "invalid_ota_config"):
+                self.load()
+        self.config.pop("signed_releases")
+        self.config["require_deployment_arm"] = True
+        with self.assertRaisesRegex(ValueError, "invalid_ota_config"):
+            self.load()
+        self.assertFalse((self.root / "jobs").exists())
+
+    def test_arm_verifier_is_wired_even_when_optional(self):
+        self.config.update(signed_releases=self.signing(), require_deployment_arm=False)
+        jobs = self.load()
+        self.assertTrue(callable(jobs.deployment_arm_verifier))
+        self.assertFalse(jobs.require_deployment_arm)
+        self.assertEqual(jobs.deployment_arm_verifier.gateway_id, "pi-lab-01")
+
+    def test_configured_enforcement_blocks_unsigned_client_commands_before_monitor_handoff(self):
+        self.config.update(signed_releases=self.signing(), require_deployment_arm=True,
+                           install_enabled=True, uart_monitor=True)
+        jobs = self.load()
+        handler = client.CommandHandler("pi-lab-01", ota=jobs)
+        command = dict(command_id="unsigned", command="install_firmware", version="0.2.0",
+                       from_version="original", sha256="a" * 64, expires_at=1500)
+        with patch.object(jobs.monitor, "pause") as pause:
+            for extra in ({}, {"url": "https://example.invalid"},
+                          {"url": "https://example.invalid", "release": {}}):
+                result = handler.handle(json.dumps(dict(command, **extra)).encode(), 0)
+                self.assertEqual(result["error"], "invalid_deployment_arm")
+                self.assertIsNone(result["event_seq"])
+            pause.assert_not_called()
+        self.assertIsNone(jobs._worker)
+        self.assertEqual(list(jobs.state_root.glob("*.json")), [])
 
     def test_explicit_signing_and_monitor_never_open_on_configuration(self):
         self.config.update(signed_releases=self.signing(), uart_monitor=True)
@@ -109,3 +147,5 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIsInstance(jobs.installer, uart_state.MonitoredInstaller)
         self.assertEqual(jobs.installer.installer.predecessor_state.seed_version, "0.1.0")
         self.assertIsNone(jobs.monitor._thread)
+        self.assertTrue(jobs.require_deployment_arm)
+        self.assertFalse(jobs.install_enabled)
