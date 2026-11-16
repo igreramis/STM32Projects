@@ -8,6 +8,7 @@ import { connected, deployBlock, DEVICE, GATEWAY, phaseLabel, prepareUpload, pro
 import type { Deployment, Snapshot } from './domain'
 import { DeploymentRequest } from './deployment'
 import './App.css'
+import './theme.css'
 
 const empty: Snapshot = { devices: [], releases: [], deployments: [] }
 const dateTime = (value: string | null) => value ? new Date(value).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'Not observed'
@@ -34,13 +35,13 @@ function Entry({ title, description, children }: { title: string; description: s
 function SignIn({ runtime }: { runtime: Runtime }) {
   const [error, setError] = useState(false)
   const [busy, setBusy] = useState(false)
-  return <Entry title="Welcome to Relay" description="Sign in with your administrator account to manage devices and firmware releases.">
+  return <Entry title="Welcome to cloud demo" description="Sign in with your administrator account to manage devices and firmware releases.">
     {error && <p role="alert">Sign-in could not be started. Please try again.</p>}
     <button disabled={busy} onClick={() => { setBusy(true); void runtime.login().catch(() => { setError(true); setBusy(false) }) }}><LockKeyhole size={17} />{busy ? 'Redirecting…' : 'Sign in securely'}<ArrowRight size={17} /></button>
     <small>Cognito authentication · Authorization code + PKCE</small><a className="text-link" href="?demo=1">Explore the isolated demo <ArrowRight size={16} /></a>
   </Entry>
 }
-function Brand() { return <div className="brand"><span className="brand-icon"><Network size={23} /></span><strong>relay<span> / edge</span></strong></div> }
+function Brand() { return <div className="brand"><span className="brand-icon"><Cloud size={23} /></span><strong>cloud demo</strong></div> }
 function Badge({ children, tone = '' }: { children: ReactNode; tone?: string }) { return <span className={`badge ${tone}`}><span className="status-dot" />{children}</span> }
 
 export function Console({ runtime }: { runtime: Runtime }) {
@@ -183,7 +184,7 @@ export function Console({ runtime }: { runtime: Runtime }) {
         </>}
         {(page === 'Overview' || page === 'Firmware') && <section className="panel releases"><div className="panel-heading"><div><h2>Firmware library <span className="count-pill">{data.releases.length}</span></h2><p>Immutable releases for STM32G0B1</p></div><button onClick={() => setModal('upload')} disabled={busy || authExpired}><Plus size={17} />Upload firmware</button></div><div className="table-scroll"><table><thead><tr><th>Release</th><th>Approval</th><th>Size</th><th>SHA-256</th><th>Created</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{[...data.releases].sort((a, b) => b.created_at.localeCompare(a.created_at)).map(release => <tr key={release.release_id}><td><div className="release-version"><span className="file-icon"><Box size={18} /></span><div><strong>v{release.version}</strong><small>{release.target}</small></div></div></td><td><Badge tone={release.status === 'approved' ? 'green' : 'amber'}>{release.status === 'approved' ? 'Approved' : 'Awaiting approval'}</Badge></td><td>{(release.size_bytes / 1024).toFixed(1)} KiB</td><td><code title={release.sha256}>{release.sha256.slice(0, 8)}…{release.sha256.slice(-6)}</code></td><td>{dateTime(release.created_at)}</td><td>{release.status === 'uploaded' ? <button className="secondary small" disabled={busy || authExpired || Boolean(pollError)} onClick={() => void action(signal => runtime.api.approve(release.release_id, signal), runtime.demo ? 'Demo release approved locally.' : 'Release integrity validated and approved.')}><ShieldCheck size={15} />Approve</button> : <button className="text-button" disabled={busy || Boolean(pending) || authExpired} onClick={() => { setReleaseId(release.release_id); setSelected(DEVICE); setPage('Devices') }}>Select <ArrowRight size={15} /></button>}</td></tr>)}</tbody></table></div>{loaded && !data.releases.length && <p className="empty">No firmware releases yet. Upload a binary to get started.</p>}<div className="panel-foot"><ShieldCheck size={15} />Approval revalidates the stored binary before signing. {runtime.demo && 'Demo hashes are fixtures.'}</div></section>}
         {(page === 'Overview' || page === 'Deployments') && <section className="panel"><div className="panel-heading"><div><h2>{page === 'Overview' ? 'Recent deployments' : 'Deployment history'}</h2><p>Reported stages, not an estimate of time remaining</p></div>{page === 'Overview' && <button className="text-button" onClick={() => setPage('Deployments')}>View all <ArrowRight size={15} /></button>}</div>{!sortedJobs.length ? <div className="empty"><History size={28} /><h3>No deployments yet</h3><p>Choose an approved release from a fresh subdevice to begin.</p></div> : <div className="job-list">{(page === 'Overview' ? sortedJobs.slice(0, 3) : sortedJobs).map(job => <Job key={job.command_id} job={job} demo={runtime.demo} />)}</div>}<div className="panel-foot"><CircleHelp size={15} />A cloud status alone is not hardware proof. Verification flags are reported by the gateway.</div></section>}
-        <footer className="footer"><span><Cloud size={14} />{runtime.demo ? 'Isolated demo · no network access' : 'Authenticated edge operations'}</span><span>Relay console / Lab MVP</span></footer>
+        <footer className="footer"><span><Cloud size={14} />{runtime.demo ? 'Isolated demo · no network access' : 'Authenticated edge operations'}</span><span>cloud demo / Lab MVP</span></footer>
       </main>
     </div>
     {modal === 'upload' && <UploadDialog demo={runtime.demo} onClose={() => setModal(null)} onUpload={async body => {

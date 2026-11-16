@@ -1,0 +1,54 @@
+/* Plasmaleap-inspired palette; system sans keeps this skin dependency-free.
+   Status/error colors and all deployment behavior deliberately stay unchanged. */
+:root {
+  --cloud-ink: #2a2a2c;
+  --cloud-paper: #fdfaf5;
+  --cloud-muted: #67625f;
+  --cloud-line: #e5dfd8;
+  --cloud-accent: #87dedf;
+  font-family: "Public Sans", "Helvetica Neue", Arial, sans-serif;
+  color: var(--cloud-ink);
+  background: var(--cloud-paper);
+}
+h1, h2, h3 { color: var(--cloud-ink); font-weight: 500; }
+h1 { letter-spacing: -1.1px; }
+p, small, dt { color: var(--cloud-muted); }
+dd, input, select { color: var(--cloud-ink); }
+input, select { border-color: var(--cloud-line); }
+button { background: var(--cloud-ink); }
+button:hover:not(:disabled) { background: #414144; }
+a { color: #246469; }
+button:focus-visible, a:focus-visible, input:focus-visible,
+select:focus-visible, summary:focus-visible { outline-color: #307d84; }
+::selection { background: #c5eeee; color: var(--cloud-ink); }
+.sidebar, .topbar, .panel, .stat { border-color: var(--cloud-line); }
+.brand strong { color: var(--cloud-ink); font-size: 23px; letter-spacing: -.9px; white-space: nowrap; }
+.brand-icon { background: var(--cloud-ink); color: var(--cloud-accent); }
+.workspace, .deploy-box, .panel-foot, th { background: var(--cloud-paper); border-color: var(--cloud-line); }
+.workspace-avatar, .nav-count { background: #def3f3; color: #245b60; }
+.nav-item { color: var(--cloud-muted); }
+.nav-item.active { background: #e4f4f4; color: var(--cloud-ink); }
+.nav-item:hover:not(:disabled) { background: #edf7f7; color: var(--cloud-ink); }
+.nav-divider { background: var(--cloud-line); }
+.security-note { background: var(--cloud-paper); border-color: var(--cloud-line); color: var(--cloud-ink); }
+.security-note p, .eyebrow, .nav-label, .sync-line, .footer,
+.breadcrumb, .stat-label, .detail-meta, .panel-foot { color: var(--cloud-muted); }
+.breadcrumb strong, .stat-value, .device-row strong { color: var(--cloud-ink); }
+.stat-label > span, .device-icon { background: #f5f0e9; color: var(--cloud-muted); border-color: var(--cloud-line); }
+.secondary { background: #fff; border-color: #ccc3bb; color: var(--cloud-ink); }
+.secondary:hover:not(:disabled) { background: var(--cloud-paper); }
+.device-row { border-color: var(--cloud-line); }
+.device-row.selected { background: #f0fafa; border-color: #9ecfd2; }
+.device-row.selected strong, .device-row.selected > svg { color: #245b60; }
+.device-row:hover:not(:disabled) { background: var(--cloud-paper); }
+.entry-art { background: var(--cloud-ink); }
+.entry-art .brand strong, .entry-art h1 { color: var(--cloud-paper); }
+.entry-art p, .entry-art > span { color: #e5dfd8; }
+.entry-art .brand-icon { background: var(--cloud-accent); color: var(--cloud-ink); }
+.entry-card > svg { color: var(--cloud-ink); }
+.orb { background: #303a3b; color: var(--cloud-accent); border-color: #506b6d; box-shadow: none; }
+@media (min-width:621px) and (max-width:850px) {
+  .brand { gap: 7px; padding-inline: 0; }
+  .brand strong { font-size: 19px; }
+  .brand-icon { width: 29px; height: 29px; }
+}
