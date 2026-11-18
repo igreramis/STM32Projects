@@ -147,6 +147,24 @@ class SyncTests(unittest.TestCase):
         self.assert_code("bootloader_sync_failed")
         self.assertEqual(self.port.writes, [b"\x7f"])
 
+    def test_state_json_letter_y_is_not_rom_ack(self):
+        self.port.ready = 0
+        self.port.response = b'{"type":"state","state":"ready"}\r\n' + b"\x79"
+        self.wait()
+        self.assertEqual(self.port.pending, b"")
+        self.assertEqual(self.port.writes, [b"\x7f"])
+
+    def test_state_json_without_rom_ack_never_identifies(self):
+        self.port.ready = 0
+        self.port.response = b'{"type":"state","state":"ready"}\r\n'
+        self.assert_code("bootloader_timeout")
+
+    def test_ack_inside_truncated_json_fails_closed(self):
+        self.port.ready = 0
+        self.port.response = b'{"type":"sta' + b"\x79\x1f"
+        self.assert_code("bootloader_sync_failed")
+        self.assertEqual(self.port.writes, [b"\x7f"])
+
     def test_nack_stops_without_retry_or_identification(self):
         self.port.ready = 0
         self.port.response = b"noise\x1f\x79"
@@ -359,6 +377,32 @@ class InstallerFixture(fixtures.Fixture):
 
 
 class InstallerTests(InstallerFixture):
+    def test_get_failure_diagnostic_is_durable_and_local_only(self):
+        original = self.rom.write
+
+        def write(data):
+            result = original(data)
+            if data == b"\x00\xff":
+                self.rom.reply[:] = b"\x1f"
+            return result
+
+        self.rom.write = write
+        result = self.run_installer()
+        self.assert_error(result, "target_validation_failed")
+        self.assertFalse(result["flash_may_be_modified"])
+        self.assertEqual(self.rom.packets, [b"\x7f", b"\x00\xff"])
+        self.assertTrue(self.rom.closed)
+        self.assertFalse(self.app.opened)
+        path = Path(result["run_directory"]) / "events.jsonl"
+        entries = [json.loads(raw) for raw in path.read_text().splitlines()]
+        diagnostic = [entry for entry in entries if entry["event"] == "rom-probe-failed"]
+        self.assertEqual(len(diagnostic), 1)
+        self.assertEqual(diagnostic[0]["stage"], "command 0x00")
+        self.assertEqual(diagnostic[0]["reason"], "nack")
+        self.assertEqual(entries[-1]["event"], "failed")
+        self.assertNotIn("rom-probe-failed", json.dumps(self.events))
+        self.assertNotIn("reason", result)
+
     def test_non_pl011_port_refused_before_open(self):
         self.installer.port = "/dev/ttyS0"
         self.assert_error(self.run_installer(), "bootloader_sync_failed")

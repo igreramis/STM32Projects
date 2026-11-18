@@ -71,7 +71,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 # Never overwrite published artifacts: approval uses immutable hashes.
 # Outputs stay in the build tree; publishing releases is a separate action.
 get_target_property(APP_SOURCES ${CMAKE_PROJECT_NAME} SOURCES)
-foreach(VERSION IN ITEMS 0.1.0 0.2.0 0.3.0 0.4.0 0.5.0 0.6.0)
+foreach(VERSION IN ITEMS 0.1.0 0.2.0 0.3.0 0.4.0 0.5.0 0.6.0 0.7.0 0.8.0)
     string(REPLACE "." "_" VERSION_TARGET "${VERSION}")
     set(TARGET "firmware_${VERSION_TARGET}")
     add_executable(${TARGET} ${APP_SOURCES})

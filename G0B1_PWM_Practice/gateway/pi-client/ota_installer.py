@@ -21,7 +21,7 @@ import heartbeat_monitor
 import rom_local
 import rom_program as engine
 import signed_release
-from rom_read_id import ACK, NACK, RomProbe
+from rom_read_id import ACK, NACK, ProtocolError, RomProbe
 
 
 ROM_WAIT_SECONDS = 120.0
@@ -68,9 +68,10 @@ def wait_for_rom(port, clock=time.monotonic, stop_event=None, progress=None):
         print("Waiting for ROM mode: set BOOT0 HIGH and press/release B2.", flush=True)
         deadline = clock() + ROM_WAIT_SECONDS
         noise = 0
+        in_json_line = False
 
         def receive(timeout):
-            nonlocal noise
+            nonlocal noise, in_json_line
             _check_stop(stop_event)
             remaining = deadline - clock()
             if remaining <= 0:
@@ -82,8 +83,17 @@ def wait_for_rom(port, clock=time.monotonic, stop_event=None, progress=None):
                 raise InstallerError("bootloader_timeout")
             if value == bytes((NACK,)):
                 raise InstallerError("bootloader_sync_failed")
-            if value == bytes((ACK,)):
+            # Application state JSON contains ASCII 'y' (0x79) in "type".
+            # It is NOT a ROM ACK. Ignore the whole JSON line, even across
+            # reads/probes; never discard a following standalone ACK.
+            # If reset interrupts a JSON line, remain conservative: an
+            # ambiguous ACK is not permission to identify/program the target.
+            if value == b"{":
+                in_json_line = True
+            if value == bytes((ACK,)) and not in_json_line:
                 return True, True
+            if value == b"\n":
+                in_json_line = False
             noise += len(value)
             if noise > ROM_NOISE_LIMIT:
                 raise InstallerError("bootloader_sync_failed")
@@ -121,19 +131,70 @@ def wait_for_rom(port, clock=time.monotonic, stop_event=None, progress=None):
 
 
 class WaitingRomProbe(RomProbe):
-    """Change sync only; inherited identification and command behavior stay fixed."""
+    """Bounded sync and local diagnostics; inherited identification stays fixed."""
+
+    _STAGES = frozenset((
+        "sync", "get send", "get-version send", "get-id send",
+        "command 0x00", "command 0x01", "command 0x02",
+        "Get length", "Get payload", "Get trailing ACK", "Get validation",
+        "Get Version payload", "Get Version trailing ACK", "Get Version validation",
+        "Get ID length", "Get ID payload", "Get ID trailing ACK", "Get ID validation",
+    ))
+    _REASONS = frozenset((
+        "deadline_expired", "timeout", "nack", "unexpected_byte", "short_write",
+        "missing_commands", "version_mismatch", "invalid_length", "wrong_device",
+        "transport_error", "protocol_error",
+    ))
 
     def __init__(self, port, clock=time.monotonic, stop_event=None, progress=None):
         super().__init__(port, timeout=2.0, clock=clock)
         self.stop_event = stop_event
         self.progress = progress
         self._sync_called = False
+        self._stage = "sync"
+        self.record = None  # Local RunRecord only, never the cloud progress callback.
 
     def sync(self):
         if self._sync_called:
             raise InstallerError("bootloader_sync_failed")
         self._sync_called = True
         wait_for_rom(self.port, self.clock, self.stop_event, self.progress)
+        print("ROM probe: sync ACK candidate received", flush=True)
+
+    def _read(self, count, deadline, stage):
+        self._stage = stage
+        return super()._read(count, deadline, stage)
+
+    def _command(self, command):
+        # Fixed vocabulary only: never print received bytes or exceptions.
+        label = {0x00: "get", 0x01: "get-version", 0x02: "get-id"}.get(command, "unknown")
+        self._stage = label + " send"
+        print("ROM probe: " + label + " started", flush=True)
+        return super()._command(command)
+
+    def run(self):
+        try:
+            identity = super().run()
+        except InstallerError:
+            raise  # Sync/cancellation retain their existing fixed error codes.
+        except Exception as exc:
+            stage = self._stage
+            reason = "transport_error" if isinstance(exc, OSError) else "protocol_error"
+            if isinstance(exc, ProtocolError):
+                stage = self._stage if exc.stage == "send" else exc.stage
+                reason = exc.reason
+            # Never serialize str(exc), RX bytes, or arbitrary stage labels.
+            stage = stage if stage in self._STAGES else "unknown"
+            reason = reason if reason in self._REASONS else "protocol_error"
+            print("ROM probe failed: stage={} reason={}".format(stage, reason), flush=True)
+            if self.record is not None:
+                try:
+                    self.record.event("rom-probe-failed", stage=stage, reason=reason)
+                except Exception:
+                    print("ROM probe: diagnostic persistence failed", flush=True)
+            raise  # Preserve original failure; never retry or continue identification.
+        print("ROM probe: identity validated", flush=True)
+        return identity
 
 
 def _wait_for_application(port, version, clock, stop_event):
@@ -403,6 +464,7 @@ class Installer:
                 with self._port(lambda: engine.open_port(serial, self.port, 115200, 2.0)) as port:
                     programmer = engine.Programmer(port, image, record, clock=self.clock)
                     programmer.io = WaitingRomProbe(port, self.clock, stop_event, notify)
+                    programmer.io.record = record
 
                     def confirm(_prompt):
                         if programmer.phase != "backed-up":

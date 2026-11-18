@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="2160" viewBox="0 0 1920 1080" stroke="none">
+  <rect width="1920" height="1080" fill="#fdfaf5"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <rect x="80" y="66" width="46" height="8" rx="4" fill="#87dedf"/>
+    <text x="143" y="80" font-size="23" font-weight="bold" fill="#2a2a2c">cloud demo</text>
+    <text x="80" y="159" font-size="53" fill="#2a2a2c">From browser to connected device.</text>
+    <text x="83" y="204" font-size="24" fill="#67625f">Cloud architecture · STM32 OTA project · AWS / Sydney</text>
+    <text x="81" y="261" font-size="16" letter-spacing="3" fill="#246469">01 / ADMINISTRATOR ACCESS</text>
+
+    <g stroke="#9ecfd2" stroke-width="3" fill="none">
+      <path d="M440 362H518M870 362H948M1300 362H1378"/>
+      <path d="M1605 444V516H270V559M700 516V559M1130 516V559M1605 516V559"/>
+      <path d="M1605 729V832"/>
+      <path d="M1130 729V887H1378" stroke-dasharray="8 7"/>
+    </g>
+    <g fill="#307d84">
+      <path d="M518 356L530 362L518 368ZM948 356L960 362L948 368ZM1378 356L1390 362L1378 368Z"/>
+      <path d="M264 559L270 571L276 559ZM694 559L700 571L706 559ZM1124 559L1130 571L1136 559ZM1599 559L1605 571L1611 559Z"/>
+      <path d="M1599 832L1605 844L1611 832ZM1599 741L1605 729L1611 741ZM1378 881L1390 887L1378 893Z"/>
+    </g>
+    <g font-size="15" fill="#246469" text-anchor="middle">
+      <text x="485" y="345">Sign-in</text><text x="915" y="345">JWT</text><text x="1345" y="345">Invoke</text>
+    </g>
+
+    <g fill="#ffffff" stroke="#e5dfd8" stroke-width="2">
+      <rect x="100" y="291" width="340" height="153" rx="18"/>
+      <rect x="530" y="291" width="340" height="153" rx="18"/>
+      <rect x="960" y="291" width="340" height="153" rx="18"/>
+    </g>
+    <rect x="1390" y="291" width="430" height="153" rx="18" fill="#2a2a2c"/>
+    <g font-size="18" fill="#246469">
+      <text x="125" y="328">WEB DASHBOARD</text><text x="555" y="328">AMAZON COGNITO</text><text x="985" y="328">API GATEWAY</text>
+    </g>
+    <g font-size="29" fill="#2a2a2c">
+      <text x="125" y="372">Admin browser</text><text x="555" y="372">Secure sign-in</text><text x="985" y="372">Authenticated API</text>
+    </g>
+    <g font-size="20" fill="#67625f">
+      <text x="125" y="410">CloudFront + private S3 UI</text><text x="555" y="410">Identity + access tokens</text><text x="985" y="410">JWT-protected HTTPS routes</text>
+    </g>
+    <text x="1415" y="328" font-size="18" fill="#87dedf">AWS LAMBDA</text>
+    <text x="1415" y="372" font-size="29" fill="#fdfaf5">Admin backend</text>
+    <text x="1415" y="410" font-size="20" fill="#e5dfd8">Approve · arm · deploy · read status</text>
+    <text x="82" y="493" font-size="16" letter-spacing="3" fill="#246469">02 / CLOUD SERVICES</text>
+    <text x="622" y="492" font-size="20" fill="#67625f">Backend coordinates state, signing, storage and commands</text>
+
+    <g fill="#ffffff" stroke="#e5dfd8" stroke-width="2">
+      <rect x="100" y="571" width="340" height="158" rx="18"/>
+      <rect x="530" y="571" width="340" height="158" rx="18"/>
+      <rect x="960" y="571" width="340" height="158" rx="18"/>
+    </g>
+    <rect x="1390" y="571" width="430" height="158" rx="18" fill="#def3f3" stroke="#9ecfd2" stroke-width="2"/>
+    <g font-size="18" fill="#246469">
+      <text x="125" y="608">AMAZON DYNAMODB</text><text x="555" y="608">AWS KMS</text><text x="985" y="608">AMAZON S3</text><text x="1415" y="608">AWS IOT CORE</text>
+    </g>
+    <g font-size="29" fill="#2a2a2c">
+      <text x="125" y="651">Project records</text><text x="555" y="651">Trusted signatures</text><text x="985" y="651">Firmware storage</text><text x="1415" y="651">Device messaging</text>
+    </g>
+    <g font-size="20" fill="#67625f">
+      <text x="125" y="692">Releases · jobs · device status</text><text x="555" y="692">Releases + deployment permits</text><text x="985" y="692">Versioned firmware binaries</text><text x="1415" y="686">Commands ↓  /  telemetry + results ↑</text>
+      <text x="1415" y="713" font-size="18">Rules → ingest Lambda → DynamoDB</text>
+    </g>
+    <text x="83" y="806" font-size="16" letter-spacing="3" fill="#246469">03 / EDGE CONNECTION</text>
+    <text x="1160" y="838" font-size="18" fill="#246469">HTTPS download</text>
+    <text x="1630" y="791" font-size="19" fill="#246469">MQTT / TLS</text>
+    <rect x="1390" y="844" width="430" height="98" rx="18" fill="#2a2a2c"/>
+    <text x="1415" y="884" font-size="28" fill="#fdfaf5">Raspberry Pi gateway</text>
+    <text x="1415" y="917" font-size="20" fill="#87dedf">pi-lab-01 → STM32 over UART</text>
+    <text x="100" y="865" font-size="28" fill="#2a2a2c">One controlled path to the device.</text>
+    <text x="100" y="906" font-size="22" fill="#67625f">Signed firmware. Single-use deployment authorization.</text>
+    <path d="M80 989H1840" stroke="#e5dfd8" stroke-width="2"/>
+    <text x="80" y="1031" font-size="18" fill="#67625f">PROJECT ARCHITECTURE / HIGH-LEVEL VIEW</text>
+    <text x="1540" y="1031" font-size="18" fill="#67625f">CLOUD DEMO     /     01</text>
+  </g>
+</svg>

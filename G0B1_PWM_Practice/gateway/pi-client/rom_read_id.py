@@ -23,6 +23,15 @@ class ProbeError(Exception):
     """Communication failed or the response did not match the expected target."""
 
 
+class ProtocolError(ProbeError):
+    """Structured diagnostic metadata, separate from potentially raw error text."""
+
+    def __init__(self, message, stage, reason):
+        super().__init__(message)
+        self.stage = stage
+        self.reason = reason
+
+
 def valid_timeout(value):
     number = float(value)
     if not math.isfinite(number) or not 0.1 <= number <= 10.0:
@@ -43,27 +52,29 @@ class RomProbe:
         while len(data) < count:
             remaining = deadline - self.clock()
             if remaining <= 0:
-                raise ProbeError("{}: response deadline expired".format(stage))
+                raise ProtocolError("{}: response deadline expired".format(stage),
+                                    stage, "deadline_expired")
             self.port.timeout = remaining
             chunk = self.port.read(count - len(data))
             if not chunk or self.clock() > deadline:
-                raise ProbeError("{}: timed out after {}/{} bytes".format(
-                    stage, len(data), count))
+                raise ProtocolError("{}: timed out after {}/{} bytes".format(
+                    stage, len(data), count), stage, "timeout")
             data.extend(chunk)
         return bytes(data)
 
     def _ack(self, deadline, stage):
         value = self._read(1, deadline, stage)[0]
         if value == NACK:
-            raise ProbeError("{}: ROM returned NACK".format(stage))
+            raise ProtocolError("{}: ROM returned NACK".format(stage), stage, "nack")
         if value != ACK:
-            raise ProbeError("{}: expected ACK 0x79, received 0x{:02X}".format(
-                stage, value))
+            raise ProtocolError("{}: expected ACK 0x79, received 0x{:02X}".format(
+                stage, value), stage, "unexpected_byte")
 
     def _send(self, data):
         self.port.write_timeout = self.timeout
         if self.port.write(data) != len(data):
-            raise ProbeError("short serial write; stop and reset before retrying")
+            raise ProtocolError("short serial write; stop and reset before retrying",
+                                "send", "short_write")
         # Do not use flush()/tcdrain(): these can wait indefinitely on some ports.
 
     def _command(self, command):
@@ -87,22 +98,26 @@ class RomProbe:
         self._ack(deadline, "Get trailing ACK")
         version, commands = payload[0], payload[1:]
         if not READ_ONLY_COMMANDS.issubset(commands):
-            raise ProbeError("Get did not advertise all required read-only commands")
+            raise ProtocolError("Get did not advertise all required read-only commands",
+                                "Get validation", "missing_commands")
 
         deadline = self._command(0x01)
         version_reply = self._read(3, deadline, "Get Version payload")
         self._ack(deadline, "Get Version trailing ACK")
         if version_reply[0] != version:
-            raise ProbeError("Get and Get Version disagree on ROM version")
+            raise ProtocolError("Get and Get Version disagree on ROM version",
+                                "Get Version validation", "version_mismatch")
 
         deadline = self._command(0x02)
         count = self._read(1, deadline, "Get ID length")[0] + 1
         if count != 2:
-            raise ProbeError("expected a two-byte STM32G0 device ID, got {}".format(count))
+            raise ProtocolError("expected a two-byte STM32G0 device ID, got {}".format(count),
+                                "Get ID length", "invalid_length")
         device_id = int.from_bytes(self._read(2, deadline, "Get ID payload"), "big")
         self._ack(deadline, "Get ID trailing ACK")
         if device_id != EXPECTED_ID:
-            raise ProbeError("wrong device family: 0x{:04X}; expected 0x0467".format(device_id))
+            raise ProtocolError("wrong device family: 0x{:04X}; expected 0x0467".format(device_id),
+                                "Get ID validation", "wrong_device")
         return {
             "status": "rom_identified",
             "device_id": "0x{:04X}".format(device_id),

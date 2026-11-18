@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="2160" viewBox="0 0 1920 1080" stroke="none">
+  <rect width="1920" height="1080" fill="#fdfaf5"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <rect x="80" y="66" width="46" height="8" rx="4" fill="#87dedf"/>
+    <text x="143" y="80" font-size="23" font-weight="bold" fill="#2a2a2c">cloud demo</text>
+    <text x="80" y="159" font-size="53" fill="#2a2a2c">Cloud connected. Locally controlled.</text>
+    <text x="83" y="204" font-size="24" fill="#67625f">Raspberry Pi gateway + STM32 Nucleo · physical connection and data flow</text>
+    <text x="100" y="268" font-size="16" letter-spacing="3" fill="#246469">CLOUD</text>
+    <text x="740" y="268" font-size="16" letter-spacing="3" fill="#246469">GATEWAY</text>
+    <text x="1380" y="268" font-size="16" letter-spacing="3" fill="#246469">MICROCONTROLLER</text>
+
+    <rect x="90" y="291" width="470" height="387" rx="24" fill="#2a2a2c"/>
+    <rect x="730" y="291" width="470" height="387" rx="24" fill="#def3f3" stroke="#9ecfd2" stroke-width="2"/>
+    <rect x="1370" y="291" width="470" height="387" rx="24" fill="#ffffff" stroke="#e5dfd8" stroke-width="2"/>
+
+    <g fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M135 361H184C207 361 210 329 187 326C180 300 143 308 141 329C119 325 115 357 135 361Z" stroke="#87dedf"/>
+      <rect x="763" y="324" width="62" height="42" rx="5" stroke="#246469"/>
+      <rect x="782" y="334" width="22" height="22" rx="2" stroke="#246469"/>
+      <path d="M770 317V324M781 317V324M793 317V324M805 317V324M817 317V324" stroke="#246469"/>
+      <rect x="1404" y="324" width="54" height="42" rx="4" stroke="#246469"/>
+      <path d="M1413 315V324M1425 315V324M1437 315V324M1449 315V324M1413 366V375M1425 366V375M1437 366V375M1449 366V375" stroke="#246469"/>
+    </g>
+    <text x="121" y="414" font-size="35" fill="#fdfaf5">AWS cloud</text>
+    <text x="761" y="414" font-size="35" fill="#2a2a2c">Raspberry Pi</text>
+    <text x="1401" y="414" font-size="32" fill="#2a2a2c">NUCLEO-G0B1RE</text>
+    <text x="121" y="450" font-size="21" fill="#87dedf">Admin dashboard + services</text>
+    <text x="761" y="450" font-size="21" fill="#246469">pi-lab-01 / Linux gateway</text>
+    <text x="1401" y="450" font-size="21" fill="#246469">stm32g0b1-01 / STM32G0B1</text>
+    <path d="M121 477H529" stroke="#506b6d"/><path d="M761 477H1169M1401 477H1809" stroke="#9ecfd2"/>
+    <g font-size="24" fill="#fdfaf5">
+      <text x="121" y="522">IoT Core · secure messaging</text><text x="121" y="567">S3 · firmware downloads</text><text x="121" y="612">API · approval and authorization</text>
+    </g>
+    <g font-size="24" fill="#2a2a2c">
+      <text x="761" y="522">MQTT client + telemetry bridge</text><text x="761" y="567">Verify signatures + download</text><text x="761" y="612">UART installer + readback check</text>
+      <text x="1401" y="522">Application + state LED</text><text x="1401" y="567">Heartbeat + operating state</text><text x="1401" y="612">Built-in ROM bootloader</text>
+    </g>
+
+    <g stroke="#307d84" stroke-width="3" fill="none">
+      <path d="M560 505H716M730 577H574M1200 505H1356M1370 577H1214"/>
+    </g>
+    <g fill="#307d84">
+      <path d="M716 498L730 505L716 512ZM574 570L560 577L574 584ZM1356 498L1370 505L1356 512ZM1214 570L1200 577L1214 584Z"/>
+    </g>
+    <g font-size="18" fill="#246469" text-anchor="middle">
+      <text x="645" y="480">Deploy + image</text><text x="645" y="553">Status + results</text>
+      <text x="1285" y="480">Program / verify</text><text x="1285" y="553">State + replies</text>
+      <text x="645" y="351">Internet</text><text x="645" y="381">TLS / HTTPS</text>
+      <text x="1285" y="351">Wired UART</text><text x="1285" y="381">3.3 V logic</text>
+    </g>
+
+    <rect x="90" y="731" width="1750" height="196" rx="20" fill="#ffffff" stroke="#e5dfd8" stroke-width="2"/>
+    <text x="121" y="774" font-size="18" letter-spacing="2" fill="#246469">PI ↔ STM32 / THREE-WIRE LINK</text>
+    <text x="121" y="823" font-size="26" fill="#2a2a2c">Pi TX → PA10 / RX</text>
+    <text x="630" y="823" font-size="26" fill="#2a2a2c">Pi RX ← PA9 / TX</text>
+    <text x="1140" y="823" font-size="26" fill="#2a2a2c">GND ↔ GND</text>
+    <path d="M121 847H1809" stroke="#e5dfd8"/>
+    <text x="121" y="887" font-size="21" fill="#67625f">115200 baud · application: 8N1 · ROM programming: 8E1</text>
+    <text x="1140" y="887" font-size="21" fill="#67625f">STM32 has no direct cloud connection.</text>
+    <path d="M80 989H1840" stroke="#e5dfd8" stroke-width="2"/>
+    <text x="80" y="1031" font-size="18" fill="#67625f">SUPERVISED OTA / NO AUTOMATIC RESET OR BOOT CONTROL</text>
+    <text x="1540" y="1031" font-size="18" fill="#67625f">CLOUD DEMO     /     02</text>
+  </g>
+</svg>
