@@ -21,6 +21,7 @@ import heartbeat_monitor
 import rom_local
 import rom_program as engine
 import signed_release
+from reset_confirmation import ConfirmationTimeout, wait_for_reset
 from rom_read_id import ACK, NACK, ProtocolError, RomProbe
 
 
@@ -197,6 +198,54 @@ class WaitingRomProbe(RomProbe):
         return identity
 
 
+class ConfirmedRomProbe(WaitingRomProbe):
+    """No sync before explicit reset confirmation; one transmission, no retry."""
+
+    def __init__(self, port, confirm_reset, clock=time.monotonic,
+                 stop_event=None, progress=None):
+        super().__init__(port, clock, stop_event, progress)
+        self.confirm_reset = confirm_reset
+
+    def sync(self):
+        if self._sync_called:
+            raise InstallerError('bootloader_sync_failed')
+        self._sync_called = True
+        try:
+            _check_stop(self.stop_event)
+            if self.progress is not None:
+                self.progress('waiting_for_rom')
+            if self.confirm_reset() is not True:
+                raise InstallerError('bootloader_sync_failed')
+            _check_stop(self.stop_event)
+            # Reset has completed; no sync has been sent by this session.
+            self.port.reset_input_buffer()
+            _check_stop(self.stop_event)
+            deadline = self.clock() + self.timeout
+            self.port.write_timeout = self.timeout
+            if self.port.write(b'\x7f') != 1:
+                raise InstallerError('bootloader_sync_failed')
+            while self.clock() < deadline:
+                _check_stop(self.stop_event)
+                self.port.timeout = min(0.25, deadline - self.clock())
+                value = self.port.read(1)
+                _check_stop(self.stop_event)
+                if self.clock() >= deadline:
+                    break
+                if value == bytes((ACK,)):
+                    print('ROM probe: confirmed-reset sync ACK received', flush=True)
+                    return
+                if value:
+                    raise InstallerError('bootloader_sync_failed')
+            raise InstallerError('bootloader_timeout')
+        except ConfirmationTimeout:
+            _check_stop(self.stop_event)
+            raise InstallerError('bootloader_timeout') from None
+        except InstallerError:
+            raise
+        except Exception:
+            raise InstallerError('bootloader_sync_failed') from None
+
+
 def _wait_for_application(port, version, clock, stop_event):
     """Two fresh exact lines, bounded like heartbeat_monitor, without echoing RX.
 
@@ -295,6 +344,9 @@ class Installer:
         self.clock = time.monotonic
         self.wall_clock = time.time
         self.uart_released = True
+
+        # Local operator gate; never accepted from remote command fields.
+        self.reset_confirmation = wait_for_reset
 
     @contextmanager
     def _port(self, factory):
@@ -463,7 +515,9 @@ class Installer:
                     raise InstallerError("bootloader_sync_failed")
                 with self._port(lambda: engine.open_port(serial, self.port, 115200, 2.0)) as port:
                     programmer = engine.Programmer(port, image, record, clock=self.clock)
-                    programmer.io = WaitingRomProbe(port, self.clock, stop_event, notify)
+                    programmer.io = ConfirmedRomProbe(
+                        port, lambda: self.reset_confirmation(record, authorized, stop_event),
+                        self.clock, stop_event, notify)
                     programmer.io.record = record
 
                     def confirm(_prompt):

@@ -307,6 +307,7 @@ class InstallerFixture(fixtures.Fixture):
         self.stop = threading.Event()
         self.installer = ota.Installer(self.catalog_path, self.release_root, self.baseline_path,
                                        self.root / "ota-runs", port="/dev/ttyAMA0")
+        self.installer.reset_confirmation = Mock(return_value=True)
         self.installer.clock = self.clock
         self.installer.wall_clock = lambda: 1000 + self.clock()
         self.command = dict(command_id="job-1", command="install_firmware", version="0.2.0",
@@ -448,8 +449,15 @@ class InstallerTests(InstallerFixture):
 
     def test_delayed_rom_operator_full_engine_no_double_sync(self):
         self.rom.ready = 10
+        def confirm(record, authorize, stop):
+            self.assertEqual(self.rom.packets, [])
+            self.assertEqual(self.rom.clears, 0)
+            self.clock.now = 10
+            authorize()
+            return True
+        self.installer.reset_confirmation = confirm
         self.assertEqual(self.run_installer()["status"], "application_verified")
-        self.assertEqual(self.rom.packets.count(b"\x7f"), 6)
+        self.assertEqual(self.rom.packets.count(b"\x7f"), 1)
         self.assertEqual(self.rom.commands.count(0), 1)
         self.assertEqual(self.rom.commands.count(1), 1)
         self.assertEqual(self.rom.commands.count(2), 1)
@@ -657,8 +665,8 @@ class InstallerTests(InstallerFixture):
     def test_no_ack_deadline_closes_rom_without_app_open(self):
         self.rom.ready = 10000
         self.assert_error(self.run_installer(), "bootloader_timeout")
-        self.assertEqual(self.clock(), 120)
-        self.assertEqual(len(self.rom.packets), 60)
+        self.assertEqual(self.clock(), 2)
+        self.assertEqual(len(self.rom.packets), 1)
         self.assertTrue(self.rom.closed)
         self.assertFalse(self.app.opened)
 
