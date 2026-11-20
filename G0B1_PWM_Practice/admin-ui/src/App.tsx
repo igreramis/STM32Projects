@@ -51,6 +51,7 @@ export function Console({ runtime }: { runtime: Runtime }) {
   const [now, setNow] = useState(() => Date.now())
   const [lastSync, setLastSync] = useState<string | null>(null)
   const [pollError, setPollError] = useState('')
+  const [armError, setArmError] = useState('')
   const [authExpired, setAuthExpired] = useState(false)
   const [notice, setNotice] = useState('')
   const [selected, setSelected] = useState<string>(DEVICE)
@@ -78,11 +79,22 @@ export function Console({ runtime }: { runtime: Runtime }) {
       try {
         const next = await runtime.api.snapshot(controller.signal)
         if (controller.signal.aborted) return
-        if (!mutation.current) await requestState.request?.reconcileArm(runtime.api, controller.signal)
+        // Observation refresh must not depend on a saved arm being found.
+        setData(next); setNow(Date.now()); setLoaded(true); setPollError(''); setLastSync(new Date().toISOString())
+        if (!mutation.current) {
+          try {
+            await requestState.request?.reconcileArm(runtime.api, controller.signal)
+            if (controller.signal.aborted) return
+            setArmError('')
+          } catch (error) {
+            if (controller.signal.aborted) return
+            setArmError(safeError(error))
+            if (error instanceof ApiError && error.unauthorized) setAuthExpired(true)
+          }
+        }
         if (controller.signal.aborted) return
         requestState.request?.reconcile(next.deployments.map(j => j.command_id))
         setPending(requestState.request?.current ?? null)
-        setData(next); setNow(Date.now()); setLoaded(true); setPollError(''); setLastSync(new Date().toISOString())
       } catch (error) {
         if (controller.signal.aborted) return
         setPollError(safeError(error))
@@ -98,7 +110,7 @@ export function Console({ runtime }: { runtime: Runtime }) {
   const device = data.devices.find(d => d.device_id === selected)
   const chosenRelease = data.releases.find(r => r.release_id === releaseId)
   const selectedRelease = pending?.release_id ?? releaseId
-  const blocked = authExpired ? 'Sign in again to continue.' : requestState.error ? 'Session storage is unavailable or a saved request is invalid. Deployment is locked for safety.' : pollError ? 'Refresh successfully before deploying.' : !loaded ? 'Waiting for device observations.' : deployBlock(data, selected, selectedRelease, now)
+  const blocked = authExpired ? 'Sign in again to continue.' : requestState.error ? 'Session storage is unavailable or a saved request is invalid. Deployment is locked for safety.' : pollError ? 'Refresh successfully before deploying.' : armError ? 'Resolve the saved arm request before deploying.' : !loaded ? 'Waiting for device observations.' : deployBlock(data, selected, selectedRelease, now)
   const canSend = requestState.request?.canSend(device?.firmware, now) ?? false
   const canAbandon = requestState.request?.canAbandon(now) ?? false
   const armMessage = pending?.stage === 'deploy_pending' ? 'Deployment response uncertain. Reconcile deployment history; do not send again or start a new request.'
@@ -167,6 +179,7 @@ export function Console({ runtime }: { runtime: Runtime }) {
       <main className="main-content"><div className="page-heading"><div><p className="eyebrow">YOUR EDGE, AT A GLANCE</p><h1>{page === 'Overview' ? 'Workspace overview' : page === 'Firmware' ? 'Firmware releases' : page === 'Deployments' ? 'Deployment activity' : 'Device inventory'}</h1><p>{page === 'Overview' ? 'Monitor your devices. Ship with confidence.' : page === 'Firmware' ? 'A controlled path from binary to approved release.' : page === 'Deployments' ? 'Track every release from dispatch to application verification.' : 'Connectivity and operating state, clearly separated.'}</p></div><button className="secondary" onClick={refresh} disabled={busy || authExpired}><RefreshCw size={16} />Refresh</button></div>
         <div className="sync-line"><span className={`status-dot ${pollError ? 'amber-dot' : ''}`} />{pollError ? 'Updates interrupted · showing last known data' : loaded ? `Last synced ${dateTime(lastSync)} · refreshes every 5s` : 'Loading workspace…'}</div>
         {pollError && <div className="alert error" role="alert">{pollError}</div>}
+        {armError && <div className="alert error" role="alert">Deployment locked: {armError}</div>}
         {authExpired && <div className="alert"><span>Session expired. Actions are locked.</span><button onClick={() => void runtime.login().catch(() => setNotice('Sign-in could not be started.'))}>Sign in again</button></div>}
         {notice && <div className="alert" role="status"><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={16} /></button></div>}
         {pending && <div className="alert warning" role="alert"><div><strong>{armMessage}</strong><p>Request: <code>{pending.request_id}</code></p></div><button className="secondary" disabled={busy || authExpired} onClick={() => { setSelected(DEVICE); setReleaseId(pending.release_id); setPage('Devices'); setModal('deploy') }}>Review saved request</button></div>}

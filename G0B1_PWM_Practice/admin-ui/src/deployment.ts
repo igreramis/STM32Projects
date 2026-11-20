@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { ApiError } from './api'
 import { armSchema, DEVICE, intentSchema } from './domain'
 import type { AdminApi, Arm, Intent } from './domain'
 
@@ -54,7 +55,19 @@ export class DeploymentRequest {
     const intent: Intent = intentSchema.parse({ device_id: DEVICE, release_id: releaseId, request_id: crypto.randomUUID() })
     const pending: Saved = { ...intent, stage: 'arm_pending' }
     this.save(pending)
-    const response = await api.arm(intent, signal) // Never retry, even after uncertainty.
+    let response: Arm
+    try {
+      response = await api.arm(intent, signal) // Never retry, even after uncertainty.
+    } catch (error) {
+      // Only these POST rejections occur before any arm write. A GET 404,
+      // conflict, aborted request or transport failure is NOT proof of rejection.
+      const rejected = error instanceof ApiError && (
+        (error.status === 403 && error.code === 'deployment_disabled') ||
+        (error.status === 409 && ['device_not_ready', 'release_not_approved', 'same_version'].includes(error.code))
+      )
+      if (rejected && !signal.aborted && this.pending === pending) this.clear()
+      throw error
+    }
     if (!signal.aborted) this.acceptArm(pending, response)
   }
   canSend(fromVersion: string | null | undefined, now = Date.now()) {

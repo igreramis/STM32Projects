@@ -6,6 +6,52 @@ import { armFixture, testApi } from './test/fixtures'
 
 const signal = () => new AbortController().signal
 describe('durable arm and deployment identity', () => {
+  it.each([
+    ['deployment_disabled', 403], ['device_not_ready', 409],
+    ['release_not_approved', 409], ['same_version', 409],
+  ] as const)('clears only a definitively rejected arm POST: %s', async (code, status) => {
+    const api = testApi(), request = new DeploymentRequest(sessionStorage, 'pending')
+    const error = new ApiError(code, status)
+    vi.mocked(api.arm).mockRejectedValueOnce(error)
+    await expect(request.arm(api, '0.5.0', signal())).rejects.toBe(error)
+    expect(request.current).toBeNull()
+    expect(sessionStorage.getItem('pending')).toBeNull()
+    expect(api.arm).toHaveBeenCalledTimes(1)
+    expect(api.deploy).not.toHaveBeenCalled()
+    const rejectedId = vi.mocked(api.arm).mock.calls[0][0].request_id
+    await request.arm(api, '0.5.0', signal()) // A separate, explicit attempt.
+    expect(request.current?.request_id).not.toBe(rejectedId)
+  })
+  it.each([
+    ['network', 0], ['deployment_disabled', 503], ['same_version', 429],
+    ['arm_not_found', 404], ['arm_conflict', 409], ['request_id_reused', 409],
+    ['unauthorized', 401], ['unknown', 403],
+  ] as const)('retains uncertain or conflicting arm POST outcomes: %s/%s', async (code, status) => {
+    const api = testApi(), request = new DeploymentRequest(sessionStorage, 'pending')
+    vi.mocked(api.arm).mockRejectedValue(new ApiError(code, status))
+    await expect(request.arm(api, '0.5.0', signal())).rejects.toThrow()
+    expect(request.current?.stage).toBe('arm_pending')
+    expect(new DeploymentRequest(sessionStorage, 'pending').current).toEqual(request.current)
+    await expect(request.arm(api, '0.5.0', signal())).rejects.toThrow()
+    expect(api.arm).toHaveBeenCalledTimes(1)
+    expect(api.deploy).not.toHaveBeenCalled()
+  })
+  it('preserves the request if cancellation or failed cleanup prevents accepting rejection', async () => {
+    const api = testApi(), request = new DeploymentRequest(sessionStorage, 'pending')
+    const controller = new AbortController()
+    vi.mocked(api.arm).mockImplementationOnce(async () => {
+      controller.abort()
+      throw new ApiError('deployment_disabled', 403)
+    })
+    await expect(request.arm(api, '0.5.0', controller.signal)).rejects.toThrow()
+    expect(request.current?.stage).toBe('arm_pending')
+    const other = new DeploymentRequest(sessionStorage, 'other')
+    vi.mocked(api.arm).mockRejectedValueOnce(new ApiError('deployment_disabled', 403))
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => { throw new Error('storage unavailable') })
+    await expect(other.arm(api, '0.5.0', signal())).rejects.toThrow()
+    expect(other.current?.stage).toBe('arm_pending')
+    expect(sessionStorage.getItem('other')).not.toBeNull()
+  })
   it('persists each stage before POST and uses one exact intent for arm and dispatch', async () => {
     const api = testApi(), request = new DeploymentRequest(sessionStorage, 'pending')
     await expect(request.submit(api, '0.4.0', signal())).rejects.toThrow()

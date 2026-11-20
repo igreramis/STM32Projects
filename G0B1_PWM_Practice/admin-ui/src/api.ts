@@ -17,12 +17,17 @@ const messages: Record<string, string> = {
   arm_consumed: 'This arm has already been used. Reconcile deployment history.',
   arm_mismatch: 'The arm no longer matches this deployment. Refresh and review.',
   arm_conflict: 'Another arm exists or this request cannot be reused. Reconcile before continuing.',
+  deployment_disabled: 'Firmware deployment is disabled. Ask the operator to enable deployment before reviewing again.',
 }
 export class ApiError extends Error {
   readonly uncertain: boolean
   readonly unauthorized: boolean
+  readonly code: string
+  readonly status: number
   constructor(code: string, status = 0) {
     super(messages[code] ?? (status === 0 ? 'The service could not be reached. Check your connection.' : 'The service could not complete this request.'))
+    this.code = code
+    this.status = status
     this.uncertain = status === 0 || status >= 500 || status === 408 || status === 429
     this.unauthorized = status === 401
   }
