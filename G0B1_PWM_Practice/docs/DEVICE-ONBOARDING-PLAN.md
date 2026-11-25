@@ -1,9 +1,18 @@
 # Cloud device onboarding — inspection and proposed integration
 
-Status: **proposal only**, 2026-11-21. No onboarding implementation or deployment yet.
+Status: original proposal dated 2026-11-21; **local registration phase implemented
+2026-11-25, not deployed**. See the [implementation scope and validation](../cloud-onboarding/README.md).
 This is a new design, not evidence of an original proprietary implementation.
 The separately referenced reconstructed work log was not present in the supplied
 attachments or found in the workspace; this proposal follows the supplied task.
+
+The first implementation includes the isolated default-disabled stack, strict
+certificate admission, inventory/approval primitives, atomic registration claims,
+bootstrap policy and offline tests. It deliberately holds uncertain external
+outcomes for operator review rather than automatically resuming them. Authenticated
+admin import, guarded reconciliation, rotation, clients and AWS deployment remain
+unimplemented; the full design and acceptance gates below are not all complete.
+The baseline and inspection results below are historical, not a new live check.
 
 ## 1. Verified baseline
 

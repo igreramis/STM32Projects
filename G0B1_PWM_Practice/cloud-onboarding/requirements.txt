@@ -1,0 +1,3 @@
+# Build the deployment artifact for Lambda Python 3.12 / arm64, not on host 3.8.
+boto3>=1.37.38,<2
+cryptography>=44,<47

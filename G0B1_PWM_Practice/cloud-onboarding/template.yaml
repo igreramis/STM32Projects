@@ -1,0 +1,327 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Isolated two-device JITR lab. No OTA resources or live credential migration.
+
+Parameters:
+  ArtifactBucket:
+    Type: String
+    MinLength: 3
+    Description: Separately approved private artifact bucket; not the firmware bucket.
+    AllowedPattern: '^(?!iot-lab-firmware-844274146091$)[a-z0-9][a-z0-9.-]+$'
+  ArtifactKey:
+    Type: String
+    MinLength: 1
+  ArtifactVersion:
+    Type: String
+    MinLength: 1
+    Description: Exact immutable S3 object version of the Python 3.12 arm64 zip.
+  FactoryCaId:
+    Type: String
+    AllowedPattern: '^[0-9a-f]{64}$'
+    Description: Isolated test issuing CA ID. Register its public certificate separately.
+  RegistrationRuleName:
+    Type: String
+    Default: stm32_onboarding_registration
+    AllowedPattern: '^stm32_onboarding_[A-Za-z0-9_]{1,64}$'
+    Description: Unique rule name; explicit to avoid the rule/error-role dependency cycle.
+  RegistrationEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['false', 'true']
+
+Conditions:
+  RegistrationAllowed:
+    Fn::Equals: [{Ref: RegistrationEnabled}, 'true']
+
+Resources:
+  OnboardingTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: pk, AttributeType: S}
+        - {AttributeName: sk, AttributeType: S}
+      KeySchema:
+        - {AttributeName: pk, KeyType: HASH}
+        - {AttributeName: sk, KeyType: RANGE}
+      SSESpecification: {SSEEnabled: true}
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+      DeletionProtectionEnabled: true
+
+  BootstrapPolicy:
+    Type: AWS::IoT::Policy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: iot:Connect
+            Resource:
+              - Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:client/onboard-test-01
+              - Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:client/onboard-test-02
+            Condition:
+              Bool: {'iot:Connection.Thing.IsAttached': 'true'}
+              StringEquals: {'iot:ClientId': '${iot:Connection.Thing.ThingName}'}
+          - Effect: Allow
+            Action: iot:Publish
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/onboarding/v1/${!iot:Connection.Thing.ThingName}/request
+          - Effect: Allow
+            Action: iot:Subscribe
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topicfilter/onboarding/v1/${!iot:Connection.Thing.ThingName}/response
+          - Effect: Allow
+            Action: iot:Receive
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/onboarding/v1/${!iot:Connection.Thing.ThingName}/response
+
+  RegistrationLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName:
+        Fn::Sub: /aws/lambda/${AWS::StackName}-registration
+      RetentionInDays: 30
+
+  FailureQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      SqsManagedSseEnabled: true
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 120
+
+  RegistrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: IsolatedRegistration
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadAndCheckApprovedInventory
+                Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:ConditionCheckItem]
+                Resource: {Fn::GetAtt: [OnboardingTable, Arn]}
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys: [inventory, factory_cert, unique_mac, unique_thing, registration]
+              - Sid: WriteOnlyLifecycleAndAudit
+                Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: {Fn::GetAtt: [OnboardingTable, Arn]}
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys: [registration, 'audit:*']
+              - Sid: InspectOnlyConfiguredCA
+                Effect: Allow
+                Action: iot:DescribeCACertificate
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:cacert/${FactoryCaId}
+                Condition:
+                  StringEquals: {'aws:RequestedRegion': {Ref: 'AWS::Region'}}
+              - Sid: InspectCertificates
+                Effect: Allow
+                Action: [iot:DescribeCertificate, iot:ListPrincipalThings]
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:cert/*
+                Condition:
+                  StringEquals: {'aws:RequestedRegion': {Ref: 'AWS::Region'}}
+              # AWS does not support resource-level IAM for this read-only action.
+              - Sid: ReadAttachedPolicies
+                Effect: Allow
+                Action: iot:ListAttachedPolicies
+                Resource: '*'
+                Condition:
+                  StringEquals: {'aws:RequestedRegion': {Ref: 'AWS::Region'}}
+              - Sid: InspectOnlyTestThings
+                Effect: Allow
+                Action: [iot:DescribeThing, iot:ListThingPrincipals, iot:ListThingGroupsForThing]
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:thing/onboard-test-01
+                  - Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:thing/onboard-test-02
+                Condition:
+                  StringEquals: {'aws:RequestedRegion': {Ref: 'AWS::Region'}}
+              - Fn::If:
+                  - RegistrationAllowed
+                  - Sid: CreateOnlyTestThings
+                    Effect: Allow
+                    Action: iot:CreateThing
+                    Resource:
+                      - Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:thing/onboard-test-01
+                      - Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:thing/onboard-test-02
+                    Condition:
+                      StringEquals: {'aws:RequestedRegion': {Ref: 'AWS::Region'}}
+                  - Ref: AWS::NoValue
+              - Fn::If:
+                  - RegistrationAllowed
+                  - Sid: AttachOnlyToTestThings
+                    Effect: Allow
+                    Action: iot:AttachThingPrincipal
+                    Resource:
+                      Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:cert/*
+                    Condition:
+                      StringEquals: {'aws:RequestedRegion': {Ref: 'AWS::Region'}}
+                      ArnEquals:
+                        iot:thingArn:
+                          - Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:thing/onboard-test-01
+                          - Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:thing/onboard-test-02
+                  - Ref: AWS::NoValue
+              # AttachPolicy authorizes the target certificate, NOT a policy ARN.
+              # Exact CA / fingerprint / fixed policy selection is enforced in code.
+              - Fn::If:
+                  - RegistrationAllowed
+                  - Sid: ActivateAndAttachBootstrap
+                    Effect: Allow
+                    Action: [iot:UpdateCertificate, iot:AttachPolicy]
+                    Resource:
+                      Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:cert/*
+                    Condition:
+                      StringEquals: {'aws:RequestedRegion': {Ref: 'AWS::Region'}}
+                  - Ref: AWS::NoValue
+              - Sid: ProtectLiveIdentity
+                Effect: Deny
+                Action: 'iot:*'
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:cert/f3190d109b88f9234702070d246c4d109f83012b48748fe193165371933e10d0
+                  - Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:thing/pi-lab-01
+              - Sid: WriteOwnLogs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: {Fn::GetAtt: [RegistrationLogGroup, Arn]}
+              - Sid: SendFailedEvents
+                Effect: Allow
+                Action: sqs:SendMessage
+                Resource: {Fn::GetAtt: [FailureQueue, Arn]}
+
+  RegistrationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: {Fn::Sub: '${AWS::StackName}-registration'}
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: aws_adapter.handler
+      Role: {Fn::GetAtt: [RegistrationRole, Arn]}
+      Code:
+        S3Bucket: {Ref: ArtifactBucket}
+        S3Key: {Ref: ArtifactKey}
+        S3ObjectVersion: {Ref: ArtifactVersion}
+      MemorySize: 256
+      Timeout: 90
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          ONBOARDING_TABLE: {Ref: OnboardingTable}
+          EXPECTED_ACCOUNT: {Ref: 'AWS::AccountId'}
+          AWS_PARTITION: {Ref: 'AWS::Partition'}
+          FACTORY_CA_ID: {Ref: FactoryCaId}
+          BOOTSTRAP_POLICY: {Ref: BootstrapPolicy}
+          REGISTRATION_ENABLED: {Ref: RegistrationEnabled}
+
+  RegistrationRetries:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: {Ref: RegistrationFunction}
+      Qualifier: '$LATEST'
+      MaximumRetryAttempts: 2
+      MaximumEventAgeInSeconds: 300
+      DestinationConfig:
+        OnFailure: {Destination: {Fn::GetAtt: [FailureQueue, Arn]}}
+
+  RuleFailureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: iot.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: {'aws:SourceAccount': {Ref: 'AWS::AccountId'}}
+              ArnEquals:
+                aws:SourceArn:
+                  Fn::Sub: arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:rule/${RegistrationRuleName}
+      Policies:
+        - PolicyName: SendRuleFailures
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: {Fn::GetAtt: [FailureQueue, Arn]}
+
+  RegistrationRule:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      RuleName: {Ref: RegistrationRuleName}
+      TopicRulePayload:
+        AwsIotSqlVersion: '2016-03-23'
+        Sql:
+          Fn::Sub: "SELECT * FROM '$aws/events/certificates/registered/${FactoryCaId}'"
+        RuleDisabled: {Fn::If: [RegistrationAllowed, false, true]}
+        Actions:
+          - Lambda: {FunctionArn: {Fn::GetAtt: [RegistrationFunction, Arn]}}
+        ErrorAction:
+          Sqs:
+            QueueUrl: {Ref: FailureQueue}
+            RoleArn: {Fn::GetAtt: [RuleFailureRole, Arn]}
+            UseBase64: false
+
+  AllowExactRegistrationRule:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: {Ref: RegistrationFunction}
+      Principal: iot.amazonaws.com
+      SourceAccount: {Ref: 'AWS::AccountId'}
+      SourceArn: {Fn::GetAtt: [RegistrationRule, Arn]}
+
+  RecoveryQueueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Registration recovery needed. Inspect; never blindly replay or release claims.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: {Fn::GetAtt: [FailureQueue, QueueName]}
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  RegistrationErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Registration Lambda errors; inspect retained checkpoints and failure queue.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: {Ref: RegistrationFunction}
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  OnboardingTableName: {Value: {Ref: OnboardingTable}}
+  BootstrapPolicyName: {Value: {Ref: BootstrapPolicy}}
+  FailureQueueUrl: {Value: {Ref: FailureQueue}}
+  RegistrationFunctionName: {Value: {Ref: RegistrationFunction}}
